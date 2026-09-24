@@ -1,5 +1,5 @@
 // Cache-first for the app shell so it opens offline. Bump CACHE when you deploy changes.
-const CACHE = 'sourdough-v1';
+const CACHE = 'sourdough-v2';
 const ASSETS = ['./', './index.html', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {

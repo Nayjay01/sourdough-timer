@@ -22,6 +22,7 @@
     --accent: #E3A857;
     --accent-ink: #1B1410;
     --warn: #E06B4C;
+    --soft: #D8C36A;
     --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, "Noto Serif", Georgia, serif;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   }
@@ -109,6 +110,17 @@
     content: ""; position: absolute; left: -24px; top: 17px; width: 12px; height: 12px; border-radius: 50%;
     background: var(--bg); border: 2px solid var(--muted);
   }
+  .step.soft::before { border-color: var(--soft); }
+  .step.soft .when { color: var(--soft); }
+  .flag { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; font-size: 14px; padding: 6px 0 6px 10px; border-left: 2px solid var(--muted); }
+  .flag.hard { border-color: var(--warn); color: var(--warn); }
+  .flag.soft { border-color: var(--soft); color: var(--soft); }
+  .flag.ok { color: var(--muted); }
+  .flag button { padding: 6px 10px; font-size: 13px; flex-shrink: 0; }
+  .notice.soft { border-color: var(--soft); }
+  .soft-text { color: var(--soft); }
+  .chip { display: inline-flex; align-items: center; gap: 2px; padding: 2px 2px 2px 12px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-size: 14px; }
+  .chip button { padding: 4px 8px; }
   .step.done::before { background: var(--muted); border-color: var(--muted); }
   .step.current::before { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 4px rgba(227,168,87,0.22); }
   .step.conflict::before { border-color: var(--warn); }
@@ -181,15 +193,19 @@ const STEP_DEFS = [
   { id: 'cool',  name: 'Cool',               dur: 60,  min: 30,  max: 180,  inc: 15, attend: 'none',  note: 'Do not cut it yet.' },
 ];
 const STEP_BY_ID = Object.fromEntries(STEP_DEFS.map(s => [s.id, s]));
-const COLD_INDEX = STEP_DEFS.findIndex(s => s.id === 'cold');
 
 const DEFAULT_SETTINGS = {
   sleepStart: '22:00',
   sleepEnd: '08:00',
+  graceMins: 30,       // minutes inside each edge of the sleep window that only warn
   durs: Object.fromEntries(STEP_DEFS.map(s => [s.id, s.dur])),
   coldMin: 480,
   coldMax: 1440,
+  foldMin: 20,         // tightest fold gap Fix it may suggest
+  bulkMin: 240,        // Fix it bounds for bulk
+  bulkMax: 420,
 };
+const FOLD_GAPS = ['fold1', 'fold2', 'fold3']; // gaps between folds; fold4's gap leads into bulk
 
 function minutesOfDay(t) {
   const d = new Date(t);
@@ -206,6 +222,15 @@ function isAsleep(t, settings) {
   if (s < e) return m >= s && m < e;
   return m >= s || m < e; // wraps midnight
 }
+/** 'hard' deep in the sleep window, 'soft' within the grace margin of either edge, null when awake. */
+function sleepLevel(t, settings) {
+  if (!isAsleep(t, settings)) return null;
+  const m = minutesOfDay(t);
+  const s = parseHM(settings.sleepStart), e = parseHM(settings.sleepEnd);
+  const sinceStart = (m - s + 1440) % 1440;
+  const untilEnd = (e - m + 1440) % 1440;
+  return Math.min(sinceStart, untilEnd) < (settings.graceMins || 0) ? 'soft' : 'hard';
+}
 
 /** Build a timeline from a start time and a durations map. */
 function buildTimeline(startAt, durs) {
@@ -219,33 +244,61 @@ function buildTimeline(startAt, durs) {
 }
 function readyAt(timeline) { return timeline[timeline.length - 1].end; }
 
-/** Moments where a person must be awake. */
+/** Moments where a person must be present. `key` identifies the moment for overrides. */
 function attendMoments(timeline) {
   const out = [];
   for (const s of timeline) {
-    if (s.def.attend === 'start' || s.def.attend === 'both') out.push({ t: s.start, step: s, label: s.def.name });
-    if (s.def.attend === 'both') out.push({ t: s.end, step: s, label: `Finish ${s.def.name.toLowerCase()}` });
+    if (s.def.attend === 'start' || s.def.attend === 'both') out.push({ t: s.start, step: s, label: s.def.name, key: `${s.def.id}:start` });
+    if (s.def.attend === 'both') out.push({ t: s.end, step: s, label: `Finish ${s.def.name.toLowerCase()}`, key: `${s.def.id}:end` });
   }
   return out;
 }
-function conflicts(timeline, settings, respectSleep) {
-  if (!respectSleep) return [];
-  return attendMoments(timeline).filter(m => isAsleep(m.t, settings));
+
+/**
+ * Every upcoming hands-on moment that clashes with sleep or a time you're out.
+ * ctx: { respectSleep, done, overrides, busy, now }. Done steps and moments
+ * already in the past are never flagged; overridden moments are skipped.
+ */
+function checkMoments(timeline, settings, ctx = {}) {
+  const { respectSleep = true, done = {}, overrides = {}, busy = [], now = -Infinity } = ctx;
+  const out = [];
+  for (const m of attendMoments(timeline)) {
+    if (done[m.step.def.id] || m.t <= now || overrides[m.key]) continue;
+    const out1 = busy.find(b => m.t >= b.from && m.t < b.to);
+    if (out1) { out.push({ ...m, level: 'hard', reason: 'out' }); continue; }
+    const lvl = respectSleep ? sleepLevel(m.t, settings) : null;
+    if (lvl) out.push({ ...m, level: lvl, reason: 'sleep' });
+  }
+  return out;
+}
+const hardOnly = ms => ms.filter(m => m.level === 'hard');
+function bakeCtx(bake, now = Date.now()) {
+  return { respectSleep: bake.respectSleep, done: bake.done, overrides: bake.overrides || {}, busy: bake.busy || [], now };
 }
 function totalMinutes(durs) { return STEP_DEFS.reduce((a, d) => a + durs[d.id], 0); }
 
-/** Forward: start now, stretch the cold proof so the bake lands in waking hours. */
+/** Cold proof length closest to `prefer` (within limits) that clears every hard clash, or null. */
+function fitCold(startAt, durs, settings, ctx, prefer, minCold = settings.coldMin) {
+  const inc = STEP_BY_ID.cold.inc;
+  const lo = Math.max(settings.coldMin, minCold), hi = settings.coldMax;
+  const tryD = d => hardOnly(checkMoments(buildTimeline(startAt, { ...durs, cold: d }), settings, ctx)).length === 0;
+  const start = Math.min(hi, Math.max(lo, prefer));
+  if (tryD(start)) return start;
+  for (let k = inc; k <= hi - lo + inc; k += inc) {
+    if (start - k >= lo && tryD(start - k)) return start - k;
+    if (start + k <= hi && tryD(start + k)) return start + k;
+  }
+  return null;
+}
+
+/** Forward: start at `startAt`, stretch the cold proof so hands-on steps land in waking hours. */
 function solveForward(startAt, settings, respectSleep) {
   const durs = { ...settings.durs };
-  const inc = STEP_BY_ID.cold.inc;
-  for (let d = settings.coldMin; d <= settings.coldMax; d += inc) {
-    durs.cold = d;
-    const tl = buildTimeline(startAt, durs);
-    if (conflicts(tl, settings, respectSleep).length === 0) return { ok: true, startAt, durs, timeline: tl };
-  }
-  durs.cold = settings.durs.cold;
+  const ctx = { respectSleep };
+  const d = fitCold(startAt, durs, settings, ctx, settings.coldMin);
+  if (d != null) { durs.cold = d; return { ok: true, startAt, durs, timeline: buildTimeline(startAt, durs) }; }
   const tl = buildTimeline(startAt, durs);
-  return { ok: false, startAt, durs, timeline: tl, conflicts: conflicts(tl, settings, respectSleep) };
+  return { ok: false, startAt, durs, timeline: tl, conflicts: hardOnly(checkMoments(tl, settings, ctx)) };
 }
 /** Earliest start at or after `from` that works. */
 function nextGoodStart(from, settings, respectSleep, horizonHours = 48) {
@@ -258,17 +311,17 @@ function nextGoodStart(from, settings, respectSleep, horizonHours = 48) {
 /** Backward: finish cooling at `ready`. Shortest cold proof that works wins (latest possible start). */
 function solveBackward(ready, settings, respectSleep) {
   const durs = { ...settings.durs };
-  const inc = STEP_BY_ID.cold.inc;
-  for (let d = settings.coldMin; d <= settings.coldMax; d += inc) {
+  const ctx = { respectSleep };
+  for (let d = settings.coldMin; d <= settings.coldMax; d += STEP_BY_ID.cold.inc) {
     durs.cold = d;
     const startAt = ready - totalMinutes(durs) * MIN;
     const tl = buildTimeline(startAt, durs);
-    if (conflicts(tl, settings, respectSleep).length === 0) return { ok: true, startAt, durs, timeline: tl };
+    if (hardOnly(checkMoments(tl, settings, ctx)).length === 0) return { ok: true, startAt, durs, timeline: tl };
   }
   durs.cold = settings.durs.cold;
   const startAt = ready - totalMinutes(durs) * MIN;
   const tl = buildTimeline(startAt, durs);
-  return { ok: false, startAt, durs, timeline: tl, conflicts: conflicts(tl, settings, respectSleep) };
+  return { ok: false, startAt, durs, timeline: tl, conflicts: hardOnly(checkMoments(tl, settings, ctx)) };
 }
 /** Nearest workable ready times on either side of a failed target. */
 function nearbyReadyTimes(ready, settings, respectSleep) {
@@ -279,15 +332,93 @@ function nearbyReadyTimes(ready, settings, respectSleep) {
   }
   return { earlier, later };
 }
-/** Re-solve only the cold proof for an existing bake, keeping everything else. */
-function refitCold(bake, settings) {
-  const durs = { ...bake.durs };
-  const inc = STEP_BY_ID.cold.inc;
-  for (let d = settings.coldMin; d <= settings.coldMax; d += inc) {
-    durs.cold = d;
-    if (conflicts(buildTimeline(bake.startAt, durs), settings, bake.respectSleep).length === 0) return d;
+
+/**
+ * Which remaining durations a replan may touch, with the shortest each can be
+ * given what has already happened. A fold gap is editable while the next fold
+ * hasn't happened; bulk and cold while they aren't done.
+ */
+function editableDurations(bake, tl, now) {
+  const elapsed = s => Math.max(0, Math.ceil((now - s.start) / MIN));
+  const byId = Object.fromEntries(tl.map(s => [s.def.id, s]));
+  const folds = [];
+  FOLD_GAPS.forEach((id, i) => {
+    const next = STEP_DEFS[STEP_DEFS.findIndex(d => d.id === id) + 1].id;
+    if (!bake.done[next] && byId[next].start > now) folds.push({ id, floor: elapsed(byId[id]) });
+  });
+  return {
+    folds,
+    bulk: bake.done.bulk ? null : { floor: elapsed(byId.bulk) },
+    cold: bake.done.cold ? null : { floor: elapsed(byId.cold) },
+  };
+}
+
+/**
+ * Replan options for a bake that has hard clashes, gentlest first:
+ * fridge only, tighter folds, bulk shorter or longer, then folds and bulk together.
+ */
+function fixOptions(bake, rawSettings, now = Date.now(), { strict = false } = {}) {
+  // strict: also clear clashes that are only inside the grace margin.
+  const settings = strict ? { ...rawSettings, graceMins: 0 } : rawSettings;
+  const tl = buildTimeline(bake.startAt, bake.durs);
+  const ctx = bakeCtx(bake, now);
+  const ed = editableDurations(bake, tl, now);
+  const base = bake.durs;
+
+  const withCold = durs => {
+    if (!ed.cold) return hardOnly(checkMoments(buildTimeline(bake.startAt, durs), settings, ctx)).length === 0 ? durs : null;
+    const d = fitCold(bake.startAt, durs, settings, ctx, base.cold, ed.cold.floor);
+    return d == null ? null : { ...durs, cold: d };
+  };
+  const setFolds = (durs, gap) => {
+    const out = { ...durs };
+    ed.folds.forEach(f => { out[f.id] = Math.max(f.floor, Math.min(base[f.id], gap)); });
+    return out;
+  };
+  const curGap = ed.folds.length ? Math.max(...ed.folds.map(f => base[f.id])) : null;
+  const foldSteps = [];
+  if (curGap != null) for (let g = curGap - 5; g >= settings.foldMin; g -= 5) foldSteps.push(g);
+  const bulkSteps = [];
+  if (ed.bulk) {
+    const lo = Math.max(settings.bulkMin, ed.bulk.floor), hi = settings.bulkMax;
+    for (let k = 15; k <= Math.max(base.bulk - lo, hi - base.bulk); k += 15) {
+      if (base.bulk - k >= lo) bulkSteps.push(base.bulk - k);
+      if (base.bulk + k <= hi) bulkSteps.push(base.bulk + k);
+    }
   }
-  return null;
+
+  const options = [];
+  const push = (kind, durs, gap) => durs && options.push(describeOption(kind, bake, durs, gap, settings, now));
+
+  if (ed.cold) push('cold', withCold({ ...base }));
+  for (const g of foldSteps) { const d = withCold(setFolds(base, g)); if (d) { push('folds', d, g); break; } }
+  for (const b of bulkSteps) { const d = withCold({ ...base, bulk: b }); if (d) { push('bulk', d); break; } }
+  if (!options.some(o => o.kind === 'folds' || o.kind === 'bulk')) {
+    let best = null;
+    for (const g of foldSteps) for (const b of bulkSteps) {
+      const d = withCold({ ...setFolds(base, g), bulk: b });
+      const cost = (curGap - g) * ed.folds.length + Math.abs(b - base.bulk);
+      if (d && (!best || cost < best.cost)) best = { d, g, cost };
+    }
+    if (best) push('both', best.d, best.g);
+  }
+  // Drop duplicates (e.g. fridge-only already solves it, so "folds" would be the same plan).
+  const seen = new Set();
+  return options.filter(o => {
+    const k = JSON.stringify(o.durs);
+    if (o.changes.length === 0 || seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+}
+function describeOption(kind, bake, durs, gap, settings, now) {
+  const tl = buildTimeline(bake.startAt, durs);
+  const changes = [];
+  if (gap != null && FOLD_GAPS.some(id => durs[id] !== bake.durs[id])) changes.push(`Folds every ${gap} min`);
+  if (durs.bulk !== bake.durs.bulk) changes.push(`Bulk ${fmtDur(durs.bulk)} (${durs.bulk < bake.durs.bulk ? 'warmer spot' : 'cooler spot'})`);
+  if (durs.cold !== bake.durs.cold) changes.push(`Fridge ${fmtDur(durs.cold)}`);
+  const titles = { cold: 'Adjust the fridge proof', folds: 'Tighten the folds', bulk: durs.bulk < bake.durs.bulk ? 'Shorten bulk' : 'Lengthen bulk', both: 'Tighten folds and change bulk' };
+  const soft = checkMoments(tl, settings, bakeCtx(bake, now)).filter(m => m.level === 'soft');
+  return { kind, title: titles[kind], durs, changes, timeline: tl, soft };
 }
 
 /** Move step i's start to `newStart` by stretching or trimming the step before it. */
@@ -407,11 +538,15 @@ function load() {
   try {
     const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
     return {
-      bakes: Array.isArray(s.bakes) ? s.bakes : [],
+      bakes: Array.isArray(s.bakes) ? s.bakes.map(normalizeBake) : [],
       settings: { ...DEFAULT_SETTINGS, ...(s.settings || {}), durs: { ...DEFAULT_SETTINGS.durs, ...((s.settings || {}).durs || {}) } },
       view: { screen: 'home' },
     };
   } catch { return { bakes: [], settings: { ...DEFAULT_SETTINGS }, view: { screen: 'home' } }; }
+}
+/** Fill in fields added after a bake was first saved. */
+function normalizeBake(b) {
+  return { overrides: {}, busy: [], done: {}, ...b, durs: { ...DEFAULT_SETTINGS.durs, ...(b.durs || {}) } };
 }
 function save() {
   localStorage.setItem(LS_KEY, JSON.stringify({ bakes: state.bakes, settings: state.settings }));
@@ -443,14 +578,14 @@ function nextAction(bake, now = Date.now()) {
    Share links
    ============================================================ */
 function encodeBake(bake) {
-  const json = JSON.stringify({ n: bake.name, s: bake.startAt, d: bake.durs, r: bake.respectSleep ? 1 : 0, k: bake.done });
+  const json = JSON.stringify({ n: bake.name, s: bake.startAt, d: bake.durs, r: bake.respectSleep ? 1 : 0, k: bake.done, o: bake.overrides, u: bake.busy });
   return btoa(unescape(encodeURIComponent(json))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function decodeBake(str) {
   try {
     const b64 = str.replace(/-/g, '+').replace(/_/g, '/');
     const o = JSON.parse(decodeURIComponent(escape(atob(b64))));
-    return { id: uid(), name: o.n || 'Shared bake', startAt: o.s, durs: { ...DEFAULT_SETTINGS.durs, ...o.d }, respectSleep: !!o.r, done: o.k || {}, createdAt: Date.now() };
+    return normalizeBake({ id: uid(), name: o.n || 'Shared bake', startAt: o.s, durs: o.d, respectSleep: !!o.r, done: o.k || {}, overrides: o.o || {}, busy: o.u || [], createdAt: Date.now() });
   } catch { return null; }
 }
 function shareUrl(bake) {
@@ -484,7 +619,7 @@ function render() {
   const v = state.view;
   if (v.screen === 'bake' && bakeById(v.id)) {
     renderBake(bakeById(v.id));
-    tick = setInterval(() => { if (state.view.screen === 'bake') renderBake(bakeById(state.view.id), true); }, 30 * 1000);
+    tick = setInterval(() => { if (state.view.screen === 'bake') renderBake(bakeById(state.view.id)); }, 30 * 1000);
   } else {
     state.view = { screen: 'home' };
     renderHome();
@@ -511,7 +646,7 @@ function renderHome() {
     ${active.map(b => {
       const na = nextAction(b, now);
       const tl = buildTimeline(b.startAt, b.durs);
-      const cf = conflicts(tl, state.settings, b.respectSleep);
+      const hard = hardOnly(checkMoments(tl, state.settings, bakeCtx(b, now)));
       return h`
       <div class="card tap" data-open="${b.id}" role="button" tabindex="0">
         <div class="row spread">
@@ -522,7 +657,7 @@ function renderHome() {
           <span class="serif ${na.finished ? 'muted' : ''}" style="font-size:19px">${esc(na.label)}</span>
           <span class="${na.t - now < 0 && !na.finished ? 'warn' : 'accent'}">${na.finished ? '' : fmtCountdown(na.t - now)}</span>
         </div>
-        ${cf.length ? h`<div class="small warn" style="margin-top:6px">${cf.length} step${cf.length > 1 ? 's' : ''} land while you're asleep</div>` : ''}
+        ${hard.length ? h`<div class="small warn" style="margin-top:6px">${hard.length} step${hard.length > 1 ? 's' : ''} clash with sleep or time out. Tap to fix.</div>` : ''}
       </div>`;
     }).join('')}
   `;
@@ -535,53 +670,89 @@ function renderHome() {
   app.querySelector('[data-act="settings"]').onclick = openSettings;
 }
 
-function renderBake(bake, quiet = false) {
+function flagText(m) {
+  if (m.reason === 'out') return `${m.label} is while you're out`;
+  return m.level === 'hard' ? `${m.label} is in your sleep window` : `${m.label} is inside your ${state.settings.graceMins} min grace`;
+}
+
+function renderBake(bake) {
+  if (!bake) return;
   const now = Date.now();
   const tl = buildTimeline(bake.startAt, bake.durs);
-  const cf = conflicts(tl, state.settings, bake.respectSleep);
-  const conflictSteps = new Set(cf.map(m => m.step.def.id));
+  const flags = checkMoments(tl, state.settings, bakeCtx(bake, now));
+  const hard = hardOnly(flags);
+  const soft = flags.filter(m => m.level === 'soft');
   const ci = currentIndex(bake);
   const na = nextAction(bake, now);
   const scrollY = window.scrollY;
 
+  // One "time between folds" control covers every fold gap that is still ahead.
+  const ed = editableDurations(bake, tl, now);
+  const gapIds = ed.folds.map(f => f.id);
+  const intervalRow = gapIds.length ? STEP_DEFS.slice(ci).find(d => d.id.startsWith('fold'))?.id : null;
+  const interval = gapIds.length ? Math.max(...gapIds.map(id => bake.durs[id])) : null;
+  const overridden = attendMoments(tl).filter(m => bake.overrides[m.key] && !bake.done[m.step.def.id] && m.t > now);
+
   let nowPlaced = false;
   const stepsHtml = tl.map((s, i) => {
-    const cls = ['step', i < ci ? 'done' : '', i === ci ? 'current' : '', conflictSteps.has(s.def.id) ? 'conflict' : ''].join(' ');
+    const id = s.def.id;
+    const stepFlags = flags.filter(m => m.step.def.id === id);
+    const stepOver = overridden.filter(m => m.step.def.id === id);
+    const cls = ['step', i < ci ? 'done' : '', i === ci ? 'current' : '',
+      stepFlags.some(m => m.level === 'hard') ? 'conflict' : stepFlags.length ? 'soft' : ''].join(' ');
     let nowline = '';
     if (!nowPlaced && s.start > now) { nowline = h`<div class="nowline"><span>now</span></div>`; nowPlaced = true; }
-    const adjustable = i >= ci;
+    const future = i >= ci;
+    const isGap = FOLD_GAPS.includes(id);
     const min = s.def.flex ? state.settings.coldMin : s.def.min;
     const max = s.def.flex ? state.settings.coldMax : s.def.max;
     return nowline + h`
-      <div class="${cls}" data-step="${s.def.id}">
+      <div class="${cls}" data-step="${id}">
         <div class="row spread">
           <div>
             <div class="when">${fmtWhen(s.start, now)}</div>
             <div class="name">${esc(s.def.name)}</div>
           </div>
-          <div class="dur" id="dur-${s.def.id}">${fmtDur(s.dur)}</div>
+          <div class="dur" id="dur-${id}">${fmtDur(s.dur)}</div>
         </div>
-        ${s.def.note && i >= ci ? h`<div class="small muted">${esc(s.def.note)}</div>` : ''}
-        ${adjustable ? h`
+        ${s.def.note && future ? h`<div class="small muted">${esc(s.def.note)}</div>` : ''}
+        ${id === intervalRow ? h`
           <div class="controls">
-            <input type="range" min="${min}" max="${max}" step="${s.def.inc}" value="${s.dur}" data-slider="${s.def.id}" aria-label="${esc(s.def.name)} duration">
+            <div class="small row spread"><span class="muted">Time between folds</span><span id="interval-val">${interval} min</span></div>
+            <input type="range" min="15" max="45" step="5" value="${interval}" data-interval aria-label="Time between folds">
           </div>` : ''}
-        ${i >= ci ? h`
+        ${future && !isGap ? h`
+          <div class="controls">
+            ${id === 'fold4' ? h`<div class="small muted">Rest after the last fold, before bulk</div>` : ''}
+            <input type="range" min="${min}" max="${max}" step="${s.def.inc}" value="${s.dur}" data-slider="${id}" aria-label="${esc(s.def.name)} duration">
+          </div>` : ''}
+        ${stepFlags.map(m => h`
+          <div class="flag ${m.level}">
+            <span>${esc(flagText(m))} (${fmtTime(m.t)})</span>
+            ${m.level === 'hard' ? h`<button data-override="${m.key}">${m.reason === 'out' ? "I'll do it anyway" : "I'll be up"}</button>` : ''}
+          </div>`).join('')}
+        ${stepOver.map(m => h`
+          <div class="flag ok"><span>You'll handle ${esc(m.label.toLowerCase())} (${fmtTime(m.t)})</span><button class="quiet" data-unoverride="${m.key}">Undo</button></div>`).join('')}
+        ${future ? h`
           <div class="actions">
-            ${i === ci ? h`<button class="primary" data-done="${s.def.id}">Done now</button>` : ''}
-            ${(s.def.attend !== 'none') ? h`<button data-alarm="${s.def.id}">${bell()} Alarm</button>` : ''}
-            ${s.def.attend === 'both' ? h`<button data-alarm-end="${s.def.id}">${bell()} End alarm</button>` : ''}
+            ${i === ci ? h`<button class="primary" data-done="${id}">Done now</button>` : ''}
+            ${(s.def.attend !== 'none') ? h`<button data-alarm="${id}">${bell()} Alarm</button>` : ''}
+            ${s.def.attend === 'both' ? h`<button data-alarm-end="${id}">${bell()} End alarm</button>` : ''}
           </div>` : ''}
       </div>`;
   }).join('');
 
+  const outs = (bake.busy || []).filter(b => b.to > now);
   app.innerHTML = h`
     <div class="topbar">
       <div class="left">
         <button class="icon quiet" aria-label="Back" data-act="back">${chevron()}</button>
         <h1>${esc(bake.name)}</h1>
       </div>
-      <button class="icon quiet" aria-label="Share" data-act="share">${shareIcon()}</button>
+      <div class="row">
+        <button class="icon quiet" aria-label="Settings" data-act="settings">${gear()}</button>
+        <button class="icon quiet" aria-label="Share" data-act="share">${shareIcon()}</button>
+      </div>
     </div>
     <div class="hero">
       <div class="muted">Ready to eat</div>
@@ -594,23 +765,26 @@ function renderBake(bake, quiet = false) {
           <span class="${na.t - now < 0 && !na.finished ? 'warn' : 'accent'}">${na.finished ? '' : fmtCountdown(na.t - now)}</span>
         </div>
       </div>
+      ${outs.length ? h`<div class="row wrap" style="margin-top:12px">${outs.map(o => h`
+        <span class="chip">Out ${fmtWhen(o.from, now)}–${sameDay(o.from, o.to) ? fmtTime(o.to) : fmtWhen(o.to, now)}
+          <button class="quiet" aria-label="Remove" data-unbusy="${o.from}">✕</button></span>`).join('')}</div>` : ''}
     </div>
-    ${cf.length ? h`
+    ${hard.length ? h`
       <div class="notice bad">
-        <div><strong>${cf.length} step${cf.length > 1 ? 's' : ''}</strong> now fall in your sleep window (${fmtSleep()}).</div>
-        <div class="row wrap" style="margin-top:10px">
-          <button data-act="refit">Refit the cold proof</button>
-          <button class="quiet" data-act="ignore">Ignore for this bake</button>
-        </div>
+        <div><strong>${hard.length} step${hard.length > 1 ? 's' : ''}</strong> ${hard.length > 1 ? 'clash' : 'clashes'} with sleep or time out.</div>
+        <button class="primary" data-act="fix" style="margin-top:10px">Fix it</button>
+      </div>` : soft.length ? h`
+      <div class="notice soft">
+        <div>${soft.map(m => esc(flagText(m))).join('. ')}. That's within your leeway.</div>
+        <button data-act="fix-strict" style="margin-top:10px">Tighten anyway</button>
       </div>` : ''}
     <div class="timeline">${stepsHtml}</div>
     <div class="stack" style="margin-top:22px">
+      <button class="wide" data-act="out">I'm out for a while…</button>
       <button class="wide" data-act="calendar">${cal()} Add every step to calendar</button>
-      <div class="row">
-        <label class="field" style="margin:0;flex:1">Started at
-          <input type="datetime-local" value="${toLocalInput(bake.startAt)}" data-act="start" style="margin-top:4px">
-        </label>
-      </div>
+      <label class="field" style="margin:0">Started at
+        <input type="datetime-local" value="${toLocalInput(bake.startAt)}" data-act="start" style="margin-top:4px">
+      </label>
       <label class="switch"><span>Avoid sleep window (${fmtSleep()})</span><input type="checkbox" ${bake.respectSleep ? 'checked' : ''} data-act="sleep"></label>
       <button class="quiet" data-act="delete" style="color:var(--warn)">Delete this bake</button>
     </div>
@@ -618,40 +792,110 @@ function renderBake(bake, quiet = false) {
   `;
   window.scrollTo(0, scrollY);
 
-  app.querySelector('[data-act="back"]').onclick = () => { state.view = { screen: 'home' }; render(); };
-  app.querySelector('[data-act="share"]').onclick = () => shareBake(bake);
-  app.querySelector('[data-act="calendar"]').onclick = () => downloadIcs(bake, attendMoments(tl).filter(m => m.t > now), `${slug(bake.name)}.ics`);
-  app.querySelector('[data-act="delete"]').onclick = () => {
+  const on = (sel, fn) => { const el = app.querySelector(sel); if (el) el.onclick = fn; };
+  const commit = () => { save(); renderBake(bake); };
+  on('[data-act="back"]', () => { state.view = { screen: 'home' }; render(); });
+  on('[data-act="settings"]', openSettings);
+  on('[data-act="share"]', () => shareBake(bake));
+  on('[data-act="fix"]', () => openFixSheet(bake, false));
+  on('[data-act="fix-strict"]', () => openFixSheet(bake, true));
+  on('[data-act="out"]', () => openOutSheet(bake));
+  on('[data-act="calendar"]', () => downloadIcs(bake, attendMoments(tl).filter(m => m.t > now), `${slug(bake.name)}.ics`));
+  on('[data-act="delete"]', () => {
     if (confirm(`Delete "${bake.name}"?`)) { state.bakes = state.bakes.filter(b => b.id !== bake.id); save(); state.view = { screen: 'home' }; render(); }
-  };
-  app.querySelector('[data-act="start"]').onchange = e => { const t = new Date(e.target.value).getTime(); if (!isNaN(t)) { bake.startAt = t; save(); renderBake(bake); } };
-  app.querySelector('[data-act="sleep"]').onchange = e => { bake.respectSleep = e.target.checked; save(); renderBake(bake); };
-  const refit = app.querySelector('[data-act="refit"]');
-  if (refit) refit.onclick = () => {
-    const d = refitCold(bake, state.settings);
-    if (d == null) { toast('No cold proof length fixes this'); return; }
-    bake.durs.cold = d; save(); renderBake(bake); toast(`Cold proof set to ${fmtDur(d)}`);
-  };
-  const ignore = app.querySelector('[data-act="ignore"]');
-  if (ignore) ignore.onclick = () => { bake.respectSleep = false; save(); renderBake(bake); };
+  });
+  app.querySelector('[data-act="start"]').onchange = e => { const t = new Date(e.target.value).getTime(); if (!isNaN(t)) { bake.startAt = t; commit(); } };
+  app.querySelector('[data-act="sleep"]').onchange = e => { bake.respectSleep = e.target.checked; commit(); };
+
+  app.querySelectorAll('[data-override]').forEach(b => b.onclick = () => { bake.overrides[b.dataset.override] = true; commit(); });
+  app.querySelectorAll('[data-unoverride]').forEach(b => b.onclick = () => { delete bake.overrides[b.dataset.unoverride]; commit(); });
+  app.querySelectorAll('[data-unbusy]').forEach(b => b.onclick = () => { bake.busy = bake.busy.filter(o => String(o.from) !== b.dataset.unbusy); commit(); });
 
   app.querySelectorAll('[data-slider]').forEach(inp => {
     const id = inp.dataset.slider;
     inp.oninput = () => { document.getElementById(`dur-${id}`).textContent = fmtDur(Number(inp.value)); };
-    inp.onchange = () => { bake.durs[id] = Number(inp.value); save(); renderBake(bake); };
+    inp.onchange = () => { bake.durs[id] = Number(inp.value); commit(); };
   });
-  app.querySelectorAll('[data-done]').forEach(btn => btn.onclick = () => {
-    markDone(bake, tl, btn.dataset.done);
-    save(); renderBake(bake);
-  });
+  const iv = app.querySelector('[data-interval]');
+  if (iv) {
+    iv.oninput = () => { document.getElementById('interval-val').textContent = `${iv.value} min`; };
+    iv.onchange = () => { ed.folds.forEach(f => { bake.durs[f.id] = Math.max(f.floor, Number(iv.value)); }); commit(); };
+  }
+  app.querySelectorAll('[data-done]').forEach(btn => btn.onclick = () => { markDone(bake, tl, btn.dataset.done); commit(); });
   app.querySelectorAll('[data-alarm],[data-alarm-end]').forEach(btn => btn.onclick = () => {
     const end = 'alarmEnd' in btn.dataset;
     const id = end ? btn.dataset.alarmEnd : btn.dataset.alarm;
     const s = tl.find(x => x.def.id === id);
-    const t = end ? s.end : s.start;
-    const label = end ? `Finish ${s.def.name.toLowerCase()}` : s.def.name;
-    openAlarmSheet(bake, t, label);
+    openAlarmSheet(bake, end ? s.end : s.start, end ? `Finish ${s.def.name.toLowerCase()}` : s.def.name);
   });
+}
+
+/** Replan options, plus "I'll be up" for each clash. */
+function openFixSheet(bake, strict) {
+  const now = Date.now();
+  const tl = buildTimeline(bake.startAt, bake.durs);
+  const flags = checkMoments(tl, state.settings, bakeCtx(bake, now)).filter(m => strict || m.level === 'hard');
+  const options = fixOptions(bake, state.settings, now, { strict });
+  const keyTimes = o => {
+    const rows = [];
+    const nextFolds = o.timeline.filter(s => s.def.id.startsWith('fold') && !bake.done[s.def.id] && s.start > now);
+    if (o.kind === 'folds' || o.kind === 'both') rows.push(['Folds', nextFolds.map(s => fmtTime(s.start)).join(', ')]);
+    if (!bake.done.shape) rows.push(['Shape', fmtWhen(o.timeline[7].start, now)]);
+    rows.push(['Bake', fmtWhen(o.timeline[9].start, now)], ['Ready', fmtWhen(readyAt(o.timeline), now)]);
+    return rows.map(([k, v]) => h`<div class="row spread small"><span class="muted">${k}</span><span>${v}</span></div>`).join('');
+  };
+  openSheet(h`
+    <h2>Fix it</h2>
+    <p class="muted small" style="margin-top:6px">${flags.map(m => esc(flagText(m)) + ` (${fmtTime(m.t)})`).join('. ')}.</p>
+    <div class="stack">
+      ${options.length ? options.map((o, i) => h`
+        <div class="card" style="margin:0">
+          <h3>${esc(o.title)}</h3>
+          <div class="accent small" style="margin:4px 0 8px">${esc(o.changes.join(' · '))}</div>
+          ${keyTimes(o)}
+          ${o.soft.length ? h`<div class="small soft-text" style="margin-top:6px">Still inside grace: ${esc(o.soft.map(m => m.label).join(', '))}</div>` : ''}
+          <button class="primary wide" data-use="${i}" style="margin-top:10px">Use this</button>
+        </div>`).join('') : h`
+        <div class="notice">Nothing within your limits clears this. You can widen the limits in Settings, or handle it yourself below.</div>`}
+      ${flags.map(m => h`
+        <button data-up="${m.key}">${m.reason === 'out' ? "I'll do it anyway" : "I'll be up"}: ${esc(m.label.toLowerCase())} at ${fmtTime(m.t)}</button>`).join('')}
+      <button class="quiet" data-close>Cancel</button>
+    </div>
+  `);
+  sheet.querySelectorAll('[data-use]').forEach(b => b.onclick = () => {
+    const o = options[Number(b.dataset.use)];
+    bake.durs = { ...o.durs }; save(); closeSheet(); renderBake(bake); toast(o.changes.join(', '));
+  });
+  sheet.querySelectorAll('[data-up]').forEach(b => b.onclick = () => {
+    bake.overrides[b.dataset.up] = true; save(); b.remove();
+    renderBake(bake);
+    if (!sheet.querySelector('[data-up]')) closeSheet();
+  });
+  sheet.querySelector('[data-close]').onclick = closeSheet;
+}
+
+/** "I'm out from X to Y" for this bake. Folds and other hands-on steps are replanned around it. */
+function openOutSheet(bake) {
+  const from = roundTo(Date.now() + 30 * MIN, 15);
+  openSheet(h`
+    <h2>I'm out for a while</h2>
+    <p class="muted small" style="margin-top:6px">Hands-on steps in this time get flagged, and Fix it will fit them around it.</p>
+    <div class="stack">
+      <label class="field">Leaving at<input type="datetime-local" value="${toLocalInput(from)}" data-from style="margin-top:4px"></label>
+      <label class="field">Back at<input type="datetime-local" value="${toLocalInput(from + 3 * 60 * MIN)}" data-to style="margin-top:4px"></label>
+      <button class="primary wide" data-save>Add</button>
+      <button class="quiet" data-close>Cancel</button>
+    </div>
+  `);
+  sheet.querySelector('[data-close]').onclick = closeSheet;
+  sheet.querySelector('[data-save]').onclick = () => {
+    const f = new Date(sheet.querySelector('[data-from]').value).getTime();
+    const t = new Date(sheet.querySelector('[data-to]').value).getTime();
+    if (isNaN(f) || isNaN(t) || t <= f) { toast('Back time must be after leaving time'); return; }
+    bake.busy = [...(bake.busy || []), { from: f, to: t }].sort((a, b) => a.from - b.from);
+    save(); closeSheet(); renderBake(bake);
+    if (hardOnly(checkMoments(buildTimeline(bake.startAt, bake.durs), state.settings, bakeCtx(bake))).length) openFixSheet(bake, false);
+  };
 }
 
 function fmtSleep() {
@@ -666,7 +910,7 @@ function openSheet(html) {
   sheet.classList.add('open'); backdrop.classList.add('open');
 }
 function closeSheet() { sheet.classList.remove('open'); backdrop.classList.remove('open'); }
-backdrop.onclick = closeSheet;
+backdrop.onclick = () => { closeSheet(); render(); };
 
 function openNewBake() {
   const now = Date.now();
@@ -695,6 +939,8 @@ function openNewBake() {
           </div></div>`;
       }
     }
+    const softs = checkMoments(result.timeline, s, { respectSleep: draft.respectSleep }).filter(m => m.level === 'soft');
+    if (softs.length) notice += h`<div class="notice soft">${softs.map(m => `${esc(m.label)} at ${fmtTime(m.t)}`).join(', ')}: inside your ${s.graceMins} min grace.</div>`;
     if (result.startAt < now - 5 * MIN) {
       notice += h`<div class="notice bad">That start time is already in the past (${fmtWhen(result.startAt, now)}). Pick a later ready time.</div>`;
     }
@@ -733,7 +979,7 @@ function openNewBake() {
     });
     sheet.querySelector('[data-save]').onclick = () => commit(result);
     function commit(r) {
-      const bake = { id: uid(), name: draft.name.trim() || autoName(r.startAt), startAt: r.startAt, durs: { ...r.durs }, respectSleep: draft.respectSleep, done: {}, createdAt: Date.now() };
+      const bake = { id: uid(), name: draft.name.trim() || autoName(r.startAt), startAt: r.startAt, durs: { ...r.durs }, respectSleep: draft.respectSleep, done: {}, overrides: {}, busy: [], createdAt: Date.now() };
       state.bakes.push(bake); save(); closeSheet();
       state.view = { screen: 'bake', id: bake.id }; render();
     }
@@ -746,22 +992,39 @@ function autoName(startAt) {
 
 function openSettings() {
   const s = state.settings;
+  const pair = (label, lo, hi, min, max, step) => h`
+    <div>
+      <div class="row spread"><span>${label}</span><span class="muted" id="pair-${lo}">${fmtDur(s[lo])} to ${fmtDur(s[hi])}</span></div>
+      <div class="row">
+        <input type="range" min="${min}" max="${max}" step="${step}" value="${s[lo]}" data-pair="${lo}" data-lo="${lo}" data-hi="${hi}" aria-label="${label} shortest">
+        <input type="range" min="${min}" max="${max}" step="${step}" value="${s[hi]}" data-pair="${hi}" data-lo="${lo}" data-hi="${hi}" aria-label="${label} longest">
+      </div>
+    </div>`;
   openSheet(h`
     <h2>Settings</h2>
-    <p class="muted small" style="margin-top:6px">Defaults for new bakes. Existing bakes keep their own times.</p>
-    <div class="stack">
+    <div class="stack" style="margin-top:14px">
+      <h3>Sleep</h3>
       <div class="row">
         <label class="field" style="flex:1">Asleep from<input type="time" value="${s.sleepStart}" data-s="sleepStart" style="margin-top:4px"></label>
         <label class="field" style="flex:1">Awake at<input type="time" value="${s.sleepEnd}" data-s="sleepEnd" style="margin-top:4px"></label>
       </div>
-      ${STEP_DEFS.map(d => d.flex ? h`
-        <div>
-          <div class="row spread"><span>${esc(d.name)} range</span><span class="muted" id="set-cold">${fmtDur(s.coldMin)} to ${fmtDur(s.coldMax)}</span></div>
-          <div class="row">
-            <input type="range" min="240" max="1440" step="30" value="${s.coldMin}" data-cold="coldMin" aria-label="Shortest cold proof">
-            <input type="range" min="240" max="2160" step="30" value="${s.coldMax}" data-cold="coldMax" aria-label="Longest cold proof">
-          </div>
-        </div>` : h`
+      <div>
+        <div class="row spread"><span>Grace at each end</span><span class="muted" id="grace-val">${s.graceMins} min</span></div>
+        <input type="range" min="0" max="60" step="15" value="${s.graceMins}" data-grace aria-label="Grace at each end of the sleep window">
+        <div class="small muted">Steps this close to bed or waking only warn, they don't count as clashes.</div>
+      </div>
+
+      <h3 style="margin-top:10px">How far Fix it may bend</h3>
+      <div>
+        <div class="row spread"><span>Tightest gap between folds</span><span class="muted" id="foldmin-val">${s.foldMin} min</span></div>
+        <input type="range" min="15" max="30" step="5" value="${s.foldMin}" data-foldmin aria-label="Tightest gap between folds">
+      </div>
+      ${pair('Bulk ferment', 'bulkMin', 'bulkMax', 120, 600, 15)}
+      ${pair('Fridge proof', 'coldMin', 'coldMax', 240, 2160, 30)}
+
+      <h3 style="margin-top:10px">Default times for new bakes</h3>
+      <p class="muted small" style="margin:0">Existing bakes keep their own times.</p>
+      ${STEP_DEFS.filter(d => !d.flex).map(d => h`
         <div>
           <div class="row spread"><span>${esc(d.name)}</span><span class="muted" id="set-${d.id}">${fmtDur(s.durs[d.id])}</span></div>
           <input type="range" min="${d.min}" max="${d.max}" step="${d.inc}" value="${s.durs[d.id]}" data-dur="${d.id}" aria-label="${esc(d.name)} default duration">
@@ -770,20 +1033,29 @@ function openSettings() {
       <button class="primary wide" data-close>Done</button>
     </div>
   `);
-  sheet.querySelectorAll('[data-s]').forEach(i => i.onchange = () => { s[i.dataset.s] = i.value; save(); });
+  // Every change saves and redraws the page underneath, so flags update straight away.
+  const apply = () => { save(); render(); };
+  sheet.querySelectorAll('[data-s]').forEach(i => i.onchange = () => { if (i.value) { s[i.dataset.s] = i.value; apply(); } });
+  const g = sheet.querySelector('[data-grace]');
+  g.oninput = () => { document.getElementById('grace-val').textContent = `${g.value} min`; };
+  g.onchange = () => { s.graceMins = Number(g.value); apply(); };
+  const fm = sheet.querySelector('[data-foldmin]');
+  fm.oninput = () => { document.getElementById('foldmin-val').textContent = `${fm.value} min`; };
+  fm.onchange = () => { s.foldMin = Number(fm.value); apply(); };
+  sheet.querySelectorAll('[data-pair]').forEach(i => {
+    const { lo, hi } = i.dataset;
+    i.oninput = () => {
+      s[i.dataset.pair] = Number(i.value);
+      if (s[lo] > s[hi]) { if (i.dataset.pair === lo) s[hi] = s[lo]; else s[lo] = s[hi]; }
+      document.getElementById(`pair-${lo}`).textContent = `${fmtDur(s[lo])} to ${fmtDur(s[hi])}`;
+    };
+    i.onchange = apply;
+  });
   sheet.querySelectorAll('[data-dur]').forEach(i => {
     i.oninput = () => { document.getElementById(`set-${i.dataset.dur}`).textContent = fmtDur(Number(i.value)); };
-    i.onchange = () => { s.durs[i.dataset.dur] = Number(i.value); save(); };
+    i.onchange = () => { s.durs[i.dataset.dur] = Number(i.value); apply(); };
   });
-  sheet.querySelectorAll('[data-cold]').forEach(i => {
-    i.oninput = () => {
-      s[i.dataset.cold] = Number(i.value);
-      if (s.coldMin > s.coldMax) { if (i.dataset.cold === 'coldMin') s.coldMax = s.coldMin; else s.coldMin = s.coldMax; }
-      document.getElementById('set-cold').textContent = `${fmtDur(s.coldMin)} to ${fmtDur(s.coldMax)}`;
-    };
-    i.onchange = () => { save(); };
-  });
-  sheet.querySelector('[data-reset]').onclick = () => { state.settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)); save(); openSettings(); };
+  sheet.querySelector('[data-reset]').onclick = () => { state.settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)); apply(); openSettings(); };
   sheet.querySelector('[data-close]').onclick = () => { closeSheet(); render(); };
 }
 
@@ -850,7 +1122,7 @@ function toast(msg) {
     history.replaceState(null, '', location.pathname + location.search);
     if (shared) {
       const existing = state.bakes.find(b => b.startAt === shared.startAt && b.name === shared.name);
-      if (existing) { Object.assign(existing, { durs: shared.durs, done: shared.done, respectSleep: shared.respectSleep }); state.view = { screen: 'bake', id: existing.id }; toast('Bake updated from link'); }
+      if (existing) { Object.assign(existing, { durs: shared.durs, done: shared.done, respectSleep: shared.respectSleep, overrides: shared.overrides, busy: shared.busy }); state.view = { screen: 'bake', id: existing.id }; toast('Bake updated from link'); }
       else { state.bakes.push(shared); state.view = { screen: 'bake', id: shared.id }; toast('Bake added from link'); }
       save();
     }

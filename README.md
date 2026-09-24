@@ -30,11 +30,14 @@ Android needs nothing: the alarm button opens the Clock app with the time and la
 
 ## How the planner works
 
-- Every step has a duration. The cold proof is the only *flexible* one (8–24 h by default).
-- Hands-on moments are: mix, each fold, shape start and end, bake start and end.
-- With *Avoid sleep window* on, the solver picks the shortest cold proof that keeps every hands-on moment outside 10pm–8am. Backward mode ("ready by") does the same working back from the eating time.
-- If nothing fits it tells you why and offers the nearest workable time.
-- Sliders on any future step shift everything after it. *Done now* on a waiting step records the real duration; on a fold it re-anchors the next fold 30 min from now.
+- Every step has a duration. Hands-on moments are: mix, each fold, shape start and end, bake start and end.
+- Only upcoming moments are checked. Steps you've done, or times already past, never flag.
+- **Sleep window with grace.** Moments deep in the window are clashes (red). Moments within the grace margin of either edge (30 min by default) only warn (yellow).
+- **I'm out for a while.** Add a leaving and back time to a bake; hands-on steps in that span are clashes too.
+- **Fix it** offers replans, gentlest first, each showing the new times: adjust the fridge proof, tighten the folds, shorten or lengthen bulk, or folds and bulk together. Limits are in Settings under "How far Fix it may bend".
+- **I'll be up / I'll do it anyway** overrides a single moment. Undo from the step.
+- **Time between folds** is one slider covering every fold still ahead. *Done now* on a fold records it as done at that moment; on a waiting step it records the real duration.
+- New bakes: the solver picks a fridge proof that keeps every hands-on moment out of the sleep window, forward from now or backward from a ready time.
 
 ## Files
 

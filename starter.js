@@ -36,7 +36,7 @@ export function newStarter({ name, mode, ladder = 'balanced', keep = 20, now = D
   return st;
 }
 export function normalizeStarter(st) {
-  return { keep: 20, ladder: 'balanced', fridge: false, fridgeSince: null, feeds: [], ...st };
+  return { keep: 20, ladder: 'balanced', fridge: false, fridgeSince: null, feeds: [], notes: [], retiredAt: null, ...st };
 }
 
 export function lastFeed(st) { return st.feeds[st.feeds.length - 1] || null; }
@@ -95,6 +95,20 @@ export function undoLastFeed(st) {
   }
   return true;
 }
+/** When the next feed was due, if it has passed: used to ask whether a late log happened on time. */
+export function dueAt(st, now = Date.now()) {
+  const s = statusOf(st, now);
+  return s.nextAt && s.nextAt < now ? s.nextAt : null;
+}
+/** Gap before each feed while creating or strengthening, when a day or more was missed. Keyed by feed index. */
+export function feedGaps(st) {
+  const out = {};
+  for (let i = 1; i < st.feeds.length; i++) {
+    const f = st.feeds[i], gap = f.t - st.feeds[i - 1].t;
+    if (f.phase !== 'mature' && gap > 36 * HOUR) out[i] = { days: Math.round(gap / DAY), missed: Math.max(1, Math.round(gap / DAY) - 1) };
+  }
+  return out;
+}
 export function startStrengthening(st, ladder) { st.phase = 'strengthen'; st.ladder = ladder; }
 export function setFridge(st, inFridge, now = Date.now()) { st.fridge = inFridge; st.fridgeSince = inFridge ? now : null; }
 
@@ -115,6 +129,12 @@ export function statusOf(st, now = Date.now()) {
 
   if (st.phase !== 'mature') {
     const nextAt = last.t + FEED_INTERVAL_HOURS * HOUR;
+    const days = Math.floor((now - last.t) / DAY);
+    if (days >= 2) {
+      return { state: 'due', title: 'Feed due', nextAt, detail: st.phase === 'create'
+        ? `It's been ${days} days. Feed it now and carry on: a missed day or two just slows it down.`
+        : `It's been ${days} days, so it will be hungry and sour. Feed it now; if it doesn't double by the next feed, stay at this ratio.` };
+    }
     return nextAt <= now
       ? { state: 'due', title: 'Feed due', detail: 'Check whether it doubled, then feed.', nextAt }
       : st.phase === 'create'

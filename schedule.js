@@ -6,20 +6,21 @@ import { MIN, fmtDur } from './format.js';
 
 export const FEED_DEF = {
   id: 'feed', name: 'Feed the starter', dur: 390, min: 180, max: 900, inc: 15, attend: 'start', feed: true,
+  doneQ: 'When did you feed the starter?', short: 'Starter feed to mix',
   note: 'Wait for it to peak, domed and at least doubled, before mixing.',
 };
 export const STEP_DEFS = [
-  { id: 'mix',   name: 'Mix the dough',      dur: 15,  min: 5,   max: 30,   inc: 5,  attend: 'start', note: 'Starter, water, flour, salt.' },
-  { id: 'rest',  name: 'First rest',         dur: 45,  min: 15,  max: 120,  inc: 5,  attend: 'none',  note: 'Wait until it has grown about 50%.' },
-  { id: 'fold1', name: 'Stretch and fold 1', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start' },
-  { id: 'fold2', name: 'Stretch and fold 2', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start' },
-  { id: 'fold3', name: 'Stretch and fold 3', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start' },
-  { id: 'fold4', name: 'Stretch and fold 4', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start' },
-  { id: 'bulk',  name: 'Bulk ferment',       dur: 300, min: 120, max: 600,  inc: 15, attend: 'none',  note: 'Leave it. Adjust the slider if it is running fast or slow.' },
-  { id: 'shape', name: 'Shape',              dur: 30,  min: 10,  max: 60,   inc: 5,  attend: 'both',  note: 'Shape, into the banneton, into the fridge.' },
-  { id: 'cold',  name: 'Cold proof',         dur: 720, min: 480, max: 1440, inc: 30, attend: 'none',  flex: true, note: 'In the fridge. This is the step that stretches around sleep.' },
-  { id: 'bake',  name: 'Bake',               dur: 50,  min: 30,  max: 90,   inc: 5,  attend: 'both',  note: 'From cold, in the Dutch oven.' },
-  { id: 'cool',  name: 'Cool',               dur: 60,  min: 30,  max: 180,  inc: 15, attend: 'none',  note: 'Do not cut it yet.' },
+  { id: 'mix',   name: 'Mix the dough',      dur: 15,  min: 5,   max: 30,   inc: 5,  attend: 'start', note: 'Starter, water, flour, salt.', doneQ: 'When did you finish mixing?', short: 'Mixing' },
+  { id: 'rest',  name: 'First rest',         dur: 45,  min: 15,  max: 120,  inc: 5,  attend: 'none',  note: 'Wait until it has grown about 50%.', doneQ: 'When did the first rest finish?', short: 'First rest' },
+  { id: 'fold1', name: 'Stretch and fold 1', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the first stretch and fold?' },
+  { id: 'fold2', name: 'Stretch and fold 2', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the second stretch and fold?' },
+  { id: 'fold3', name: 'Stretch and fold 3', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the third stretch and fold?' },
+  { id: 'fold4', name: 'Stretch and fold 4', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the last stretch and fold?' },
+  { id: 'bulk',  name: 'Bulk ferment',       dur: 300, min: 120, max: 600,  inc: 15, attend: 'none',  note: 'Leave it. Adjust the slider if it is running fast or slow.', doneQ: 'When did bulk ferment finish?', short: 'Bulk' },
+  { id: 'shape', name: 'Shape',              dur: 30,  min: 10,  max: 60,   inc: 5,  attend: 'both',  note: 'Shape, into the banneton, into the fridge.', doneQ: 'When did it go into the fridge?', short: 'Shaping' },
+  { id: 'cold',  name: 'Cold proof',         dur: 720, min: 480, max: 1440, inc: 30, attend: 'none',  flex: true, note: 'In the fridge. This is the step that stretches around sleep.', doneQ: 'When did it come out of the fridge?', short: 'Fridge' },
+  { id: 'bake',  name: 'Bake',               dur: 50,  min: 30,  max: 90,   inc: 5,  attend: 'both',  note: 'From cold, in the Dutch oven.', doneQ: 'When did it come out of the oven?', short: 'Bake' },
+  { id: 'cool',  name: 'Cool',               dur: 60,  min: 30,  max: 180,  inc: 15, attend: 'none',  note: 'Do not cut it yet.', doneQ: 'When did it finish cooling?', short: 'Cooling' },
 ];
 export const ALL_DEFS = [FEED_DEF, ...STEP_DEFS];
 export const STEP_BY_ID = Object.fromEntries(ALL_DEFS.map(s => [s.id, s]));
@@ -28,7 +29,7 @@ export const FOLD_GAPS = ['fold1', 'fold2', 'fold3']; // gaps between folds; fol
 export function defsFor(withFeed) { return withFeed ? ALL_DEFS : STEP_DEFS; }
 export function bakeDefs(bake) { return defsFor(!!bake.withFeed); }
 
-/* ---------- Recipe ---------- */
+/* ---------- Settings ---------- */
 
 export const LOAF_SIZES = ['small', 'medium', 'large'];
 export const LOAF_LABEL = { small: 'Small', medium: 'Medium', large: 'Large' };
@@ -43,28 +44,10 @@ export const DEFAULT_SETTINGS = {
   foldMin: 20,
   bulkMin: 240,
   bulkMax: 420,
-  // Base recipe for a medium loaf; other sizes scale by flour weight.
-  recipe: { starter: 100, flour: 500, water: 350, salt: 10 },
-  loafFlour: { small: 350, medium: 500, large: 750 },
+  // Small and large loaves as a multiple of a recipe's medium loaf.
+  loafScale: { small: 0.7, medium: 1, large: 1.5 },
   starterKeep: 20,
 };
-
-/** Grams for each loaf and the totals. loaves = { small: n, medium: n, large: n }. */
-export function recipeFor(loaves, settings) {
-  const r = settings.recipe;
-  const items = [];
-  for (const size of LOAF_SIZES) {
-    for (let i = 0; i < (loaves[size] || 0); i++) {
-      const k = settings.loafFlour[size] / r.flour;
-      const loaf = { size, starter: r.starter * k, flour: r.flour * k, water: r.water * k, salt: r.salt * k };
-      loaf.dough = loaf.starter + loaf.flour + loaf.water + loaf.salt;
-      items.push(loaf);
-    }
-  }
-  const total = { starter: 0, flour: 0, water: 0, salt: 0, dough: 0 };
-  for (const l of items) for (const k in total) total[k] += l[k];
-  return { items, total, hydration: r.water / r.flour };
-}
 export function loafCount(loaves) { return LOAF_SIZES.reduce((a, s) => a + (loaves?.[s] || 0), 0); }
 
 /* ---------- Starter feeds ---------- */
@@ -248,6 +231,70 @@ export function markDone(bake, tl, id, now = Date.now()) {
   else bake.durs[id] = Math.max(0, Math.round((now - s.start) / MIN));
   bake.done[id] = true;
 }
+/** When a step counts as done if it runs to plan: the moment of the action for feeds and folds, the end for everything else. */
+export function isActionStep(def) { return def.attend === 'start' && def.id !== 'mix'; }
+export function plannedDoneAt(step) { return isActionStep(step.def) ? step.start : step.end; }
+
+/**
+ * Mark a step done at `at` and remember how far that was from the plan, in
+ * minutes (positive is late). Later steps move by the same amount.
+ */
+export function completeStep(bake, tl, id, at) {
+  const step = stepOf(tl, id);
+  const late = Math.round((at - plannedDoneAt(step)) / MIN);
+  markDone(bake, tl, id, at);
+  bake.late = { ...(bake.late || {}), [id]: late };
+  return late;
+}
+/** Save the parts of a bake that marking steps done changes, so it can be undone. */
+export function pushHistory(bake) {
+  const snap = JSON.parse(JSON.stringify({ startAt: bake.startAt, durs: bake.durs, done: bake.done, late: bake.late || {}, feedDone: bake.feedDone || null }));
+  bake.history = [...(bake.history || []), snap].slice(-10);
+  return snap;
+}
+export function popHistory(bake) {
+  const snap = (bake.history || []).pop();
+  if (!snap) return null;
+  Object.assign(bake, { startAt: snap.startAt, durs: snap.durs, done: snap.done, late: snap.late, feedDone: snap.feedDone || undefined });
+  return snap;
+}
+/** Remaining steps, in order, whose planned done time has already passed. */
+export function catchUpSteps(bake, now = Date.now()) {
+  const tl = bakeTimeline(bake);
+  const out = [];
+  for (let i = currentIndex(bake); i < tl.length && plannedDoneAt(tl[i]) <= now; i++) out.push(tl[i]);
+  return out;
+}
+export function isFinished(bake) { return currentIndex(bake) >= bakeDefs(bake).length; }
+
+/**
+ * What ran differently from the plan the bake was made with.
+ * Returns [{ id, text }], e.g. "First rest 1h 45m (+1h)".
+ */
+export function deviations(bake, plan = bake.plan || bake.durs) {
+  const out = [];
+  const signed = d => `${d > 0 ? '+' : '−'}${fmtDur(Math.abs(d))}`;
+  if (bake.withFeed) {
+    const d = bake.durs.feed - plan.feed;
+    if (Math.abs(d) >= 30) out.push({ id: 'feed', text: `Starter feed to mix ${fmtDur(bake.durs.feed)} (${signed(d)})` });
+  }
+  const steps = id => STEP_BY_ID[id];
+  for (const id of ['rest']) {
+    const d = bake.durs[id] - plan[id];
+    if (Math.abs(d) >= 10) out.push({ id, text: `${steps(id).short} ${fmtDur(bake.durs[id])} (${signed(d)})` });
+  }
+  const gaps = FOLD_GAPS.map(id => bake.durs[id]);
+  if (FOLD_GAPS.some(id => Math.abs(bake.durs[id] - plan[id]) >= 5)) {
+    const lo = Math.min(...gaps), hi = Math.max(...gaps);
+    out.push({ id: 'folds', text: lo === hi ? `Folds every ${lo} min` : `Folds ${lo}–${hi} min apart` });
+  }
+  for (const [id, tol] of [['bulk', 15], ['cold', 30], ['bake', 5]]) {
+    const d = bake.durs[id] - plan[id];
+    if (Math.abs(d) >= tol) out.push({ id, text: `${steps(id).short} ${fmtDur(bake.durs[id])} (${signed(d)})` });
+  }
+  return out;
+}
+
 export function currentIndex(bake) {
   const defs = bakeDefs(bake);
   const i = defs.findIndex(d => !bake.done[d.id]);

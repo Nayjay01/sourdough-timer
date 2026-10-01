@@ -19,8 +19,14 @@ export function fmtDayWord(t, now = Date.now()) {
 }
 export function fmtWhen(t, now = Date.now()) { return `${fmtDayWord(t, now)} ${fmtTime(t)}`; }
 export function fmtDate(t) { return new Date(t).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' }); }
+/** 45m, 2h 30m, 36h, or 4 days 22h for anything two days or longer. */
 export function fmtDur(mins) {
-  mins = Math.round(mins);
+  mins = Math.round(Math.abs(mins));
+  if (mins >= 48 * 60) {
+    let d = Math.floor(mins / 1440), hrs = Math.round((mins % 1440) / 60);
+    if (hrs === 24) { d += 1; hrs = 0; }
+    return hrs ? `${d} days ${hrs}h` : `${d} days`;
+  }
   const h = Math.floor(mins / 60), m = mins % 60;
   if (h && m) return `${h}h ${m}m`;
   if (h) return `${h}h`;
@@ -37,8 +43,7 @@ export function fmtCountdown(ms) {
 export function fmtAgo(ms) {
   const mins = Math.round(ms / MIN);
   if (mins < 1) return 'just now';
-  if (mins < 48 * 60) return `${fmtDur(mins)} ago`;
-  return `${Math.round(mins / (24 * 60))} days ago`;
+  return `${fmtDur(mins)} ago`;
 }
 export function toLocalInput(t) {
   const d = new Date(t);
@@ -58,3 +63,11 @@ export function esc(s) {
 }
 export function slug(s) { return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'item'; }
 export function uid() { return Math.random().toString(36).slice(2, 8) + Date.now().toString(36); }
+
+/** "4 days 22h late" / "15m early" / "on time". */
+export function fmtLate(mins) {
+  if (Math.abs(mins) < 1) return 'on time';
+  return `${fmtDur(mins)} ${mins > 0 ? 'late' : 'early'}`;
+}
+/** Deep copy of plain data. */
+export function clone(x) { return JSON.parse(JSON.stringify(x)); }

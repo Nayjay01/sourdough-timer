@@ -9,6 +9,8 @@ import { renderBake, openNewBake, renderPastBakes, activeBakeCard, decodeBake } 
 import { renderStarter, openNewStarter, renderPastStarters, starterCard } from './starter-view.js';
 import { renderRecipes, renderRecipe, recipeCard, wireRecipeCards, openRecipeEditor } from './recipe-view.js';
 import { openSettings } from './settings-view.js';
+import { startSync, setRemoteHandler, household, parseCode } from './sync.js';
+import { openHousehold, openJoin } from './household-view.js';
 
 /* ============================================================
    Home
@@ -47,6 +49,8 @@ function renderHome() {
     ${shown.map(recipeCard).join('')}
     ${recipes.length ? listLink('recipes', 'All recipes', recipes.length) : ''}
 
+    <button class="list-link" data-act="household" style="margin-top:22px"><span>Share and alerts</span><span class="muted">${household() ? 'Linked' : 'Set up'} ›</span></button>
+
     <div class="card tap guide-card" data-act="guide" role="button" tabindex="0" style="margin-top:22px">
       <div class="row">${bookIcon()}<h3>How-to guide</h3></div>
       <div class="small muted" style="margin-top:4px">Starters, flours, storage, hooch, dough, Dutch oven vs open baking, fixes and safety.</div>
@@ -61,6 +65,7 @@ function renderHome() {
   on(app, '[data-act="new-starter"]', openNewStarter);
   on(app, '[data-act="new-recipe"]', () => openRecipeEditor(null));
   on(app, '[data-act="settings"]', openSettings);
+  on(app, '[data-act="household"]', openHousehold);
   on(app, '[data-act="past-bakes"]', () => goFrom({ screen: 'past-bakes' }));
   on(app, '[data-act="past-starters"]', () => goFrom({ screen: 'past-starters' }));
   on(app, '[data-act="recipes"]', () => goFrom({ screen: 'recipes' }));
@@ -107,12 +112,14 @@ function render() {
   // Refresh countdowns on live screens, but never while a sheet is open or someone is typing.
   if (['home', 'bake', 'starter'].includes(state.view.screen)) {
     tick = setInterval(() => {
-      const typing = app.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
-      if (!sheetOpen() && !typing) render();
+      if (!sheetOpen() && !typing()) render();
     }, 30 * 1000);
   }
 }
 setRenderer(render);
+// Changes from another phone redraw the screen, unless someone is mid-way through a sheet or typing.
+const typing = () => app.contains(document.activeElement) && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
+setRemoteHandler(() => { if (!sheetOpen() && !typing()) render(); });
 setBackdropHandler(render);
 setSaveErrorHandler(() => toast('Could not save on this device'));
 
@@ -136,7 +143,12 @@ setSaveErrorHandler(() => toast('Could not save on this device'));
       save();
     }
   }
+  // A household link (#join=…) opens the join screen with the code filled in.
+  const j = location.hash.match(/#join=([A-Za-z0-9_.-]+)/);
+  if (j) history.replaceState(null, '', location.pathname + location.search);
   save(); // writes any migrated data straight away
   render();
+  startSync();
+  if (j && parseCode(j[1])) openJoin(j[1]);
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

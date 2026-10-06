@@ -115,7 +115,7 @@ export function wireStars(root, get, set) {
 
 /* ---------- Alarms and calendar ---------- */
 const IS_ANDROID = /Android/i.test(navigator.userAgent);
-const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+export const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const IOS_SHORTCUT_NAME = 'Sourdough alarm';
 
 function androidAlarmUrl(t, label) {
@@ -174,6 +174,7 @@ export function alarmHelp() {
     <details>
       <summary>Setting alarms on each phone</summary>
       <div class="small muted" style="margin-top:8px">
+        <p><strong>Best: ntfy alerts.</strong> Set up in Settings, <em>Share and alerts</em>. Every step then alerts on its own, and the alerts move when times change. The options below are fixed-time fallbacks.</p>
         <p><strong>Android.</strong> Tap Alarm on a step. The Clock app opens with the time and label filled in; tap Save.</p>
         <p><strong>iPhone.</strong> One-time setup in the Shortcuts app, then Alarm on a step creates the alarm directly.</p>
         <ol>

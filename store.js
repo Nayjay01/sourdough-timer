@@ -58,10 +58,15 @@ export const state = load();
 
 let onSaveError = () => {};
 export function setSaveErrorHandler(fn) { onSaveError = fn; }
+// Household sync watches every save: before, to stamp what changed; after, to send it.
+let hooks = { before() {}, after() {} };
+export function setSaveHooks(h) { hooks = h; }
 export function save() {
+  hooks.before();
   try {
     localStorage.setItem(LS_KEY, JSON.stringify({ bakes: state.bakes, starters: state.starters, recipes: state.recipes, settings: state.settings }));
   } catch { onSaveError(); }
+  hooks.after();
 }
 
 export const bakeById = id => state.bakes.find(b => b.id === id);

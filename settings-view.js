@@ -3,6 +3,8 @@ import { fmtDur, h, esc } from './format.js';
 import { ALL_DEFS } from './schedule.js';
 import { state, save, render, mergeSettings } from './store.js';
 import { sheet, on, openSheet, closeSheet } from './ui.js';
+import { openHousehold } from './household-view.js';
+import { household } from './sync.js';
 
 export function openSettings() {
   const s = state.settings;
@@ -18,7 +20,9 @@ export function openSettings() {
   openSheet(h`
     <h2>Settings</h2>
     <div class="stack" style="margin-top:14px">
-      <h3>Sleep</h3>
+      <button class="list-link" data-household><span>Share and alerts</span><span class="muted">${household() ? 'Linked' : 'Set up'} ›</span></button>
+      <h3 style="margin-top:6px">Sleep</h3>
+      <p class="muted small" style="margin:-4px 0 0">Settings are kept on each phone, not shared.</p>
       <div class="row">
         <label class="field" style="flex:1">Asleep from<input type="time" value="${s.sleepStart}" data-s="sleepStart" style="margin-top:4px"></label>
         <label class="field" style="flex:1">Awake at<input type="time" value="${s.sleepEnd}" data-s="sleepEnd" style="margin-top:4px"></label>
@@ -84,6 +88,7 @@ export function openSettings() {
     i.oninput = () => { document.getElementById(`set-${i.dataset.dur}`).textContent = fmtDur(Number(i.value)); };
     i.onchange = () => { s.durs[i.dataset.dur] = Number(i.value); apply(); };
   });
+  on(sheet, '[data-household]', openHousehold);
   on(sheet, '[data-reset]', () => {
     if (!confirm('Reset sleep, loaf sizes, limits and usual times to the defaults? Recipes, bakes and starters are not touched.')) return;
     state.settings = mergeSettings(); apply(); openSettings();

@@ -15,7 +15,8 @@ export const STEP_DEFS = [
   { id: 'fold1', name: 'Stretch and fold 1', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the first stretch and fold?' },
   { id: 'fold2', name: 'Stretch and fold 2', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the second stretch and fold?' },
   { id: 'fold3', name: 'Stretch and fold 3', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the third stretch and fold?' },
-  { id: 'fold4', name: 'Stretch and fold 4', dur: 30,  min: 15,  max: 60,   inc: 5,  attend: 'start', doneQ: 'When did you do the last stretch and fold?' },
+  // Bulk starts straight after the last fold, so fold 4 has no wait after it.
+  { id: 'fold4', name: 'Stretch and fold 4', dur: 0,   min: 0,   max: 0,    inc: 5,  attend: 'start', doneQ: 'When did you do the last stretch and fold?' },
   { id: 'bulk',  name: 'Bulk ferment',       dur: 300, min: 120, max: 600,  inc: 15, attend: 'none',  note: 'Leave it. Adjust the slider if it is running fast or slow.', doneQ: 'When did bulk ferment finish?', short: 'Bulk' },
   { id: 'shape', name: 'Shape',              dur: 30,  min: 10,  max: 60,   inc: 5,  attend: 'both',  note: 'Shape, into the banneton, into the fridge.', doneQ: 'When did it go into the fridge?', short: 'Shaping' },
   { id: 'cold',  name: 'Cold proof',         dur: 720, min: 480, max: 1440, inc: 30, attend: 'none',  flex: true, note: 'In the fridge. This is the step that stretches around sleep.', doneQ: 'When did it come out of the fridge?', short: 'Fridge' },
@@ -24,7 +25,7 @@ export const STEP_DEFS = [
 ];
 export const ALL_DEFS = [FEED_DEF, ...STEP_DEFS];
 export const STEP_BY_ID = Object.fromEntries(ALL_DEFS.map(s => [s.id, s]));
-export const FOLD_GAPS = ['fold1', 'fold2', 'fold3']; // gaps between folds; fold4's gap leads into bulk
+export const FOLD_GAPS = ['fold1', 'fold2', 'fold3']; // gaps between folds; bulk starts at fold 4
 
 export function defsFor(withFeed) { return withFeed ? ALL_DEFS : STEP_DEFS; }
 export function bakeDefs(bake) { return defsFor(!!bake.withFeed); }
@@ -217,34 +218,72 @@ function shiftStart(bake, tl, i, newStart) {
   const prev = tl[i - 1];
   bake.durs[prev.def.id] = Math.max(0, Math.round((prev.end + delta - prev.start) / MIN));
 }
-/**
- * "Done now" on a step. Feeding and folds are actions at the start of their
- * step, so done means "I did it now" and the wait after it stays. Every other
- * step is a span that ends when you say so, so its duration becomes what elapsed.
- */
-export function markDone(bake, tl, id, now = Date.now()) {
-  const i = tl.findIndex(s => s.def.id === id);
-  const s = tl[i];
-  const actionAtStart = s.def.attend === 'start' && s.def.id !== 'mix';
-  if (actionAtStart) shiftStart(bake, tl, i, now);
-  else if (now < s.start) shiftStart(bake, tl, i, now - s.dur * MIN);
-  else bake.durs[id] = Math.max(0, Math.round((now - s.start) / MIN));
-  bake.done[id] = true;
-}
-/** When a step counts as done if it runs to plan: the moment of the action for feeds and folds, the end for everything else. */
-export function isActionStep(def) { return def.attend === 'start' && def.id !== 'mix'; }
-export function plannedDoneAt(step) { return isActionStep(step.def) ? step.start : step.end; }
+
+/* ---------- Actions: the moments you tap ---------- */
 
 /**
- * Mark a step done at `at` and remember how far that was from the plan, in
- * minutes (positive is late). Later steps move by the same amount.
+ * Every tap in a bake. Waits (starter rising, rests, bulk, fridge, cooling)
+ * have no button of their own: a wait ends when you tap the action after it.
+ * at: the action happens at the start or the end of `step`.
+ * key: the step whose done flag records it. ends: waits the tap also closes.
+ * finish: label once the step's window has begun (mixing, shaping).
  */
-export function completeStep(bake, tl, id, at) {
-  const step = stepOf(tl, id);
-  const late = Math.round((at - plannedDoneAt(step)) / MIN);
-  markDone(bake, tl, id, at);
-  bake.late = { ...(bake.late || {}), [id]: late };
+const foldAction = (n, ends) => ({
+  id: `fold${n}`, step: `fold${n}`, key: `fold${n}`, at: 'start', ends, name: `Stretch and fold ${n}`, btn: `Done fold ${n}`,
+  doneQ: `When did you do ${n === 4 ? 'the last' : ['the first', 'the second', 'the third'][n - 1]} stretch and fold?`,
+});
+export const ACTIONS = [
+  { id: 'feed', step: 'feed', key: 'feed', at: 'start', name: 'Feed the starter', btn: 'Fed it', doneQ: 'When did you feed the starter?' },
+  { id: 'mix', step: 'mix', key: 'mix', at: 'end', name: 'Mix the dough', finish: 'Finish mixing', btn: 'Finished mixing', doneQ: 'When did you finish mixing?' },
+  foldAction(1, ['rest']), foldAction(2), foldAction(3), foldAction(4),
+  { id: 'shape', step: 'shape', key: 'shape', at: 'end', ends: ['bulk'], name: 'Shape, into the fridge', finish: 'Into the fridge', btn: 'Shaped, in the fridge', doneQ: 'When did it go into the fridge?' },
+  { id: 'ovenIn', step: 'bake', key: 'cold', at: 'start', ends: ['cold'], name: 'Into the oven', btn: 'In the oven', doneQ: 'When did it go into the oven?' },
+  { id: 'ovenOut', step: 'bake', key: 'bake', at: 'end', name: 'Out of the oven', btn: 'Out of the oven', doneQ: 'When did it come out of the oven?' },
+];
+export const ACTION_BY_ID = Object.fromEntries(ACTIONS.map(a => [a.id, a]));
+export function bakeActions(bake) { return bake.withFeed ? ACTIONS : ACTIONS.filter(a => a.id !== 'feed'); }
+export function actionDone(bake, a) { return !!bake.done[a.key]; }
+export function actionTime(tl, a) { const s = stepOf(tl, a.step); return a.at === 'start' ? s.start : s.end; }
+export function currentAction(bake) { return bakeActions(bake).find(a => !actionDone(bake, a)) || null; }
+
+/**
+ * Tap an action at `at`. A start action (feed, folds, into the oven) happens
+ * at its step's start, so the wait before it stretches or shrinks. An end
+ * action (mixing, shaping) keeps its planned length and the wait before it
+ * absorbs the difference, unless the step was already under way (the loaf
+ * is in the oven), in which case the step itself runs long or short.
+ * Records how far off plan it was, in minutes (positive is late); later steps move by that much.
+ */
+export function completeAction(bake, id, at) {
+  const a = ACTION_BY_ID[id];
+  const tl = bakeTimeline(bake);
+  const planned = actionTime(tl, a);
+  const i = tl.findIndex(s => s.def.id === a.step);
+  const s = tl[i];
+  if (a.at === 'start') shiftStart(bake, tl, i, at);
+  else {
+    const prev = tl[i - 1];
+    const underway = prev && bake.done[prev.def.id] && prev.def.attend === 'none';
+    if (underway) bake.durs[s.def.id] = Math.max(0, Math.round((at - s.start) / MIN));
+    else {
+      const floor = prev ? prev.start : -Infinity;
+      const start = Math.max(floor, at - s.dur * MIN);
+      bake.durs[s.def.id] = Math.max(0, Math.round((at - start) / MIN));
+      shiftStart(bake, tl, i, start);
+    }
+  }
+  for (const w of a.ends || []) bake.done[w] = true;
+  bake.done[a.key] = true;
+  const late = Math.round((at - planned) / MIN);
+  bake.late = { ...(bake.late || {}), [a.key]: late };
   return late;
+}
+/** Cooling needs no tap: once everything else is done and the time is up, the bake is finished. */
+export function settleBake(bake, now = Date.now()) {
+  if (bake.done.cool || currentAction(bake) || now < readyAt(bakeTimeline(bake))) return false;
+  bake.done.cool = true;
+  bake.late = { ...(bake.late || {}), cool: 0 };
+  return true;
 }
 /** Save the parts of a bake that marking steps done changes, so it can be undone. */
 export function pushHistory(bake) {
@@ -258,14 +297,14 @@ export function popHistory(bake) {
   Object.assign(bake, { startAt: snap.startAt, durs: snap.durs, done: snap.done, late: snap.late, feedDone: snap.feedDone || undefined });
   return snap;
 }
-/** Remaining steps, in order, whose planned done time has already passed. */
-export function catchUpSteps(bake, now = Date.now()) {
+/** Remaining actions, in order, whose planned time has already passed. */
+export function catchUpActions(bake, now = Date.now()) {
   const tl = bakeTimeline(bake);
-  const out = [];
-  for (let i = currentIndex(bake); i < tl.length && plannedDoneAt(tl[i]) <= now; i++) out.push(tl[i]);
-  return out;
+  return bakeActions(bake).filter(a => !actionDone(bake, a) && actionTime(tl, a) <= now);
 }
-export function isFinished(bake) { return currentIndex(bake) >= bakeDefs(bake).length; }
+export function isFinished(bake, now = Date.now()) {
+  return currentIndex(bake) >= bakeDefs(bake).length || (!currentAction(bake) && now >= readyAt(bakeTimeline(bake)));
+}
 
 /**
  * What ran differently from the plan the bake was made with.
@@ -300,18 +339,14 @@ export function currentIndex(bake) {
   const i = defs.findIndex(d => !bake.done[d.id]);
   return i === -1 ? defs.length : i;
 }
+/** The next thing to do: the live action's label and when it's due, or when the bake is ready once only cooling is left. */
 export function nextAction(bake, now = Date.now()) {
   const tl = bakeTimeline(bake);
-  const ci = currentIndex(bake);
-  if (ci >= tl.length) return { label: 'Ready to eat', t: readyAt(tl), finished: true };
-  const s = tl[ci];
-  if (s.start > now && s.def.attend !== 'none') return { label: s.def.name, t: s.start, step: s };
-  if (s.def.attend === 'both') return { label: `Finish ${s.def.name.toLowerCase()}`, t: s.end, step: s };
-  if (s.def.attend === 'none') {
-    const nxt = tl[ci + 1];
-    return { label: nxt ? nxt.def.name : 'Ready to eat', t: s.end, step: s };
-  }
-  return { label: s.def.name, t: s.start, step: s };
+  const a = currentAction(bake);
+  if (!a) return { label: 'Ready to eat', t: readyAt(tl), finished: isFinished(bake, now) };
+  const s = stepOf(tl, a.step);
+  if (a.finish) return now >= s.start ? { label: a.finish, t: s.end, action: a } : { label: a.name, t: s.start, action: a };
+  return { label: a.name, t: actionTime(tl, a), action: a };
 }
 
 /**

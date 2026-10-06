@@ -12,7 +12,7 @@ export function mergeSettings(saved = {}) {
   const fromFlour = loafFlour?.medium ? { small: loafFlour.small / loafFlour.medium, medium: 1, large: loafFlour.large / loafFlour.medium } : null;
   return {
     ...clone(DEFAULT_SETTINGS), ...rest,
-    durs: { ...DEFAULT_SETTINGS.durs, ...(saved.durs || {}) },
+    durs: { ...DEFAULT_SETTINGS.durs, ...(saved.durs || {}), fold4: 0 },
     loafScale: { ...DEFAULT_SETTINGS.loafScale, ...(saved.loafScale || fromFlour || {}) },
   };
 }
@@ -25,7 +25,9 @@ export function normalizeBake(b) {
   };
   out.durs = { ...DEFAULT_SETTINGS.durs, ...(b.durs || {}) };
   // Bakes from before plans were kept are compared against themselves, so they report no false differences.
-  if (!out.plan) out.plan = { ...out.durs };
+  out.plan = { ...(out.plan || out.durs) };
+  // Bulk now starts straight after the last fold. A bake that hasn't reached it counts the old gap as bulk, so nothing moves.
+  if (!out.done.fold4) for (const d of [out.durs, out.plan]) if (d.fold4) { d.bulk += d.fold4; d.fold4 = 0; }
   return out;
 }
 

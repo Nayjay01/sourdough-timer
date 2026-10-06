@@ -118,6 +118,20 @@ input[type="range"] { width: 100%; accent-color: var(--accent); margin: 6px 0 0;
 .step .controls { margin-top: 8px; }
 .step .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .step .actions button { padding: 7px 11px; font-size: 14px; }
+/* Waits between actions: lighter, no button of their own */
+.step.wait { padding: 8px 0 10px; }
+.step.wait::before { width: 8px; height: 8px; left: -22px; top: 14px; border-width: 2px; border-style: dashed; }
+.step.wait .name { font-size: 15px; color: var(--muted); }
+.step.wait .range { font-size: 14px; color: var(--muted); margin-left: 4px; }
+.step.wait.running::before { border-style: solid; border-color: var(--accent); }
+.step.wait.running .name { color: var(--text); }
+.step.wait.done::before { border-style: solid; background: var(--line); border-color: var(--line); }
+.step.wait.done .name, .step.wait.done .range, .step.wait.done .dur { color: var(--muted); opacity: 0.75; }
+.step .due { margin-top: 4px; }
+.step.ready-row .when { color: var(--accent); }
+.step.ready-row.done .when { color: var(--muted); }
+.dayhead { margin: 16px 0 2px -26px; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); background: var(--bg); position: relative; padding: 2px 0; }
+.dayhead:first-child { margin-top: 0; }
 .nowline { position: relative; height: 0; border-top: 1px dashed var(--accent); margin: 0 0 0 -26px; }
 .nowline span { position: absolute; right: 0; top: -9px; font-size: 12px; color: var(--accent); background: var(--bg); padding: 0 4px; }
 

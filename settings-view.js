@@ -47,7 +47,7 @@ export function openSettings() {
 
       <h3 style="margin-top:10px">Usual times for new bakes</h3>
       <p class="muted small" style="margin:0">Existing bakes keep their own times. A recipe can set its own first rest, fold gap, bulk and bake.</p>
-      ${ALL_DEFS.filter(d => !d.flex).map(d => h`
+      ${ALL_DEFS.filter(d => !d.flex && d.max > 0).map(d => h`
         <div>
           <div class="row spread"><span>${esc(d.feed ? 'Starter feed to mixing' : d.name)}</span><span class="muted" id="set-${d.id}">${fmtDur(s.durs[d.id])}</span></div>
           <input type="range" min="${d.min}" max="${d.max}" step="${d.inc}" value="${s.durs[d.id]}" data-dur="${d.id}" aria-label="${esc(d.name)} usual duration">

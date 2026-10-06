@@ -6,7 +6,7 @@ import { LOAF_SIZES } from './schedule.js';
 /** Timings a recipe may set. Values are stored in minutes; blank means "use my usual settings". */
 export const TIMING_FIELDS = [
   { key: 'rest', label: 'First rest', unit: 'min', steps: ['rest'] },
-  { key: 'fold', label: 'Time between folds', unit: 'min', steps: ['fold1', 'fold2', 'fold3', 'fold4'] },
+  { key: 'fold', label: 'Time between folds', unit: 'min', steps: ['fold1', 'fold2', 'fold3'] },
   { key: 'bulk', label: 'Bulk ferment', unit: 'h', steps: ['bulk'] },
   { key: 'bake', label: 'Bake', unit: 'min', steps: ['bake'] },
 ];

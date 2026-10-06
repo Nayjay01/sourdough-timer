@@ -1,13 +1,13 @@
 // Bake screens: new bake, the live timeline, done/late handling, Fix it, notes and past bakes.
 import {
-  MIN, HOUR, DAY, fmtTime, fmtWhen, fmtDate, fmtDur, fmtCountdown, fmtLate, toLocalInput, roundTo, grams, ratioText,
+  MIN, HOUR, DAY, fmtTime, fmtWhen, fmtDayWord, fmtDate, fmtDur, fmtCountdown, fmtLate, toLocalInput, roundTo, grams, ratioText,
   h, esc, slug, uid, sameDay, clone,
 } from './format.js';
 import {
   FOLD_GAPS, LOAF_SIZES, LOAF_LABEL, loafCount, ratioForFeed, feedPlan, bakeTimeline, stepOf, readyAt, attendMoments,
-  checkMoments, hardOnly, bakeCtx, solveForward, solveBackward, nextGoodStart, nearbyReadyTimes, currentIndex,
-  nextAction, editableDurations, fixOptions, plannedDoneAt, isActionStep, completeStep, pushHistory, popHistory,
-  catchUpSteps, isFinished, deviations,
+  checkMoments, hardOnly, bakeCtx, solveForward, solveBackward, nextGoodStart, nearbyReadyTimes,
+  nextAction, editableDurations, fixOptions, pushHistory, popHistory, isFinished, deviations,
+  ACTION_BY_ID, bakeActions, actionDone, actionTime, currentAction, completeAction, settleBake, catchUpActions,
 } from './schedule.js';
 import { PHASE_LABEL, lastFeed, logFeed, undoLastFeed, setFridge } from './starter.js';
 import { scaleRecipe, recipeSnapshot, recipeLine, effectiveSettings, sortRecipes, totalFlour, TIMING_FIELDS } from './recipes.js';
@@ -117,96 +117,159 @@ function outcomeCard(bake) {
 
 export function renderBake(bake) {
   const now = Date.now();
+  if (settleBake(bake, now)) save();
   const settings = bakeSettings(bake);
   const tl = bakeTimeline(bake);
-  const finished = isFinished(bake);
+  const finished = isFinished(bake, now);
   const flags = finished ? [] : checkMoments(tl, settings, bakeCtx(bake, now));
   const hard = hardOnly(flags);
   const soft = flags.filter(m => m.level === 'soft');
-  const ci = currentIndex(bake);
+  const actions = bakeActions(bake);
+  const cur = currentAction(bake);
   const na = nextAction(bake, now);
   const starter = starterById(bake.starterId);
-  const catchUp = finished ? [] : catchUpSteps(bake, now);
-  const showCatchUp = catchUp.length && now - plannedDoneAt(catchUp[0]) > HOUR;
-  const canUndo = (bake.history || []).length > 0 && ci > 0;
+  const catchUp = cur ? catchUpActions(bake, now) : [];
+  const showCatchUp = catchUp.length && now - actionTime(tl, catchUp[0]) > HOUR;
+  const remaining = actions.filter(a => !actionDone(bake, a)).length;
+  const lastDone = actions.filter(a => actionDone(bake, a)).pop();
+  const canUndo = (bake.history || []).length > 0 && !!lastDone;
 
   // One "time between folds" control covers every fold gap that is still ahead.
   const ed = editableDurations(bake, tl, now);
   const gapIds = ed.folds.map(f => f.id);
-  const intervalRow = gapIds.length ? tl.slice(ci).find(s => s.def.id.startsWith('fold'))?.def.id : null;
   const interval = gapIds.length ? Math.max(...gapIds.map(id => bake.durs[id])) : null;
   const overridden = attendMoments(tl).filter(m => bake.overrides[m.key] && !bake.done[m.step.def.id] && m.t > now);
   const plan = bake.withFeed ? (bake.feedDone || bakeFeedPlan(bake)) : null;
 
-  const noteFor = (s, future) => {
-    if (s.def.feed) {
-      const lines = [`${bake.done.feed ? 'Fed' : 'Feed'} ${grams(plan.starter)} starter with ${grams(plan.flour)} flour and ${grams(plan.water)} water (${ratioText(plan.r)}). Makes ${grams(plan.makes)}: ${grams(plan.need)} for the dough, ${grams(plan.keep)} to keep.`];
-      if (!bake.done.feed) lines.push(s.def.note);
-      if (!bake.done.feed && starter?.fridge) lines.push(`${starter.name} is in the fridge. Take it out an hour or so before feeding.`);
-      return lines.join(' ');
-    }
-    return future ? s.def.note : '';
+  const feedNote = () => {
+    const lines = [`${bake.done.feed ? 'Fed' : 'Feed'} ${grams(plan.starter)} starter with ${grams(plan.flour)} flour and ${grams(plan.water)} water (${ratioText(plan.r)}). Makes ${grams(plan.makes)}: ${grams(plan.need)} for the dough, ${grams(plan.keep)} to keep.`];
+    if (!bake.done.feed && starter?.fridge) lines.push(`${starter.name} is in the fridge. Take it out an hour or so before feeding.`);
+    return lines.join(' ');
   };
+  const range = (a, b) => `${fmtTime(a)} – ${sameDay(a, b) ? '' : `${fmtDayWord(b, now)} `}${fmtTime(b)}`;
+  const slider = (id, value, { extra = 0, label } = {}) => {
+    const def = stepOf(tl, id).def;
+    const min = def.flex ? settings.coldMin : def.min;
+    const max = def.flex ? settings.coldMax : def.max;
+    return h`<input type="range" min="${min}" max="${max}" step="${def.inc}" value="${value}" data-slider="${id}" data-extra="${extra}" aria-label="${esc(label || def.name)} length">`;
+  };
+  const flagsFor = id => flags.filter(m => m.step.def.id === id).map(m => h`
+    <div class="flag ${m.level}">
+      <span>${esc(flagText(m))} (${fmtTime(m.t)})</span>
+      ${m.level === 'hard' ? h`<button data-override="${m.key}">${m.reason === 'out' ? "I'll do it anyway" : "I'll be up"}</button>` : ''}
+    </div>`).join('') + overridden.filter(m => m.step.def.id === id).map(m => h`
+    <div class="flag ok"><span>You'll handle ${esc(m.label.toLowerCase())} (${fmtTime(m.t)})</span><button class="quiet" data-unoverride="${m.key}">Undo</button></div>`).join('');
 
-  let nowPlaced = false;
-  const stepsHtml = tl.map((s, i) => {
+  /** A card for something you do, with the one button that records it. The bake card holds two taps: in and out of the oven. */
+  const actionRow = (s, acts) => {
     const id = s.def.id;
-    const done = i < ci;
+    const done = acts.every(a => actionDone(bake, a));
+    const underway = !done && acts.some(a => actionDone(bake, a));
+    const live = acts.find(a => a === cur);
+    const ranged = acts.length > 1 || acts[0].at === 'end';
+    const title = acts.length > 1 ? s.def.name : acts[0].name;
     const stepFlags = flags.filter(m => m.step.def.id === id);
-    const stepOver = overridden.filter(m => m.step.def.id === id);
-    const cls = ['step', done ? 'done' : '', i === ci ? 'current' : '',
+    const cls = ['step', 'act', done ? 'done' : '', live ? 'current' : '',
       stepFlags.some(m => m.level === 'hard') ? 'conflict' : stepFlags.length ? 'soft' : ''].join(' ');
-    let nowline = '';
-    if (!finished && !nowPlaced && s.start > now) { nowline = h`<div class="nowline"><span>now</span></div>`; nowPlaced = true; }
-    const future = i >= ci;
-    const isGap = FOLD_GAPS.includes(id);
-    const min = s.def.flex ? settings.coldMin : s.def.min;
-    const max = s.def.flex ? settings.coldMax : s.def.max;
-    const note = noteFor(s, future);
-    const doneAt = plannedDoneAt(s);
-    const late = bake.late?.[id];
-    return nowline + h`
+    const lateNotes = acts.filter(a => actionDone(bake, a) && Math.abs(bake.late?.[a.key] ?? 0) >= 10).map(a => {
+      const late = bake.late[a.key];
+      return `${acts.length > 1 ? `${a.name}: p` : 'P'}lanned ${fmtWhen(actionTime(tl, a) - late * MIN, now)} · ${fmtLate(late)}`;
+    });
+    const due = live && h`<div class="small ${na.t < now ? 'warn' : 'accent'} due">${na.label === title ? 'Due' : esc(na.label)} ${fmtCountdown(na.t - now)}</div>`;
+    const note = done ? '' : s.def.feed ? feedNote() : s.def.note || '';
+    return { t: s.start, html: h`
       <div class="${cls}" data-step="${id}">
         <div class="row spread">
           <div>
-            <div class="when">${done ? `Done ${fmtWhen(doneAt, now)}` : fmtWhen(s.start, now)}</div>
-            <div class="name">${esc(s.def.name)}</div>
+            <div class="when">${done && !ranged ? 'Done ' : ''}${ranged ? range(s.start, s.end) : fmtTime(s.start)}</div>
+            <div class="name">${esc(title)}</div>
           </div>
-          <div class="dur" id="dur-${id}">${done && isActionStep(s.def) ? '' : fmtDur(s.dur)}</div>
+          ${ranged ? h`<div class="dur" id="dur-${id}">${fmtDur(s.dur)}</div>` : ''}
         </div>
-        ${done && late != null && Math.abs(late) >= 10 ? h`
-          <div class="small late-note">Planned ${fmtWhen(doneAt - late * MIN, now)} · ${fmtLate(late)}</div>` : ''}
+        ${due || ''}
+        ${lateNotes.map(t => h`<div class="small late-note">${esc(t)}</div>`).join('')}
         ${note ? h`<div class="small muted">${esc(note)}</div>` : ''}
-        ${id === intervalRow ? h`
-          <div class="controls">
-            <div class="small row spread"><span class="muted">Time between folds</span><span id="interval-val">${interval} min</span></div>
-            <input type="range" min="15" max="45" step="5" value="${interval}" data-interval aria-label="Time between folds">
-          </div>` : ''}
-        ${future && !isGap ? h`
-          <div class="controls">
-            ${id === 'fold4' ? h`<div class="small muted">Rest after the last fold, before bulk</div>` : ''}
-            ${id === 'feed' ? h`<div class="small muted">Wait until mixing (sets the feed ratio)</div>` : ''}
-            <input type="range" min="${min}" max="${max}" step="${s.def.inc}" value="${s.dur}" data-slider="${id}" aria-label="${esc(s.def.name)} duration">
-          </div>` : ''}
-        ${stepFlags.map(m => h`
-          <div class="flag ${m.level}">
-            <span>${esc(flagText(m))} (${fmtTime(m.t)})</span>
-            ${m.level === 'hard' ? h`<button data-override="${m.key}">${m.reason === 'out' ? "I'll do it anyway" : "I'll be up"}</button>` : ''}
-          </div>`).join('')}
-        ${stepOver.map(m => h`
-          <div class="flag ok"><span>You'll handle ${esc(m.label.toLowerCase())} (${fmtTime(m.t)})</span><button class="quiet" data-unoverride="${m.key}">Undo</button></div>`).join('')}
-        ${future ? h`
+        ${ranged && !done ? h`<div class="controls">${slider(id, s.dur, { label: title })}</div>` : ''}
+        ${flagsFor(id)}
+        ${!done ? h`
           <div class="actions">
-            ${i === ci ? h`<button class="primary" data-done="${id}">${s.def.feed ? 'Fed it now' : 'Done now'}</button>` : ''}
-            ${s.def.attend !== 'none' ? h`<button data-alarm="${id}">${bell()} Alarm</button>` : ''}
-            ${s.def.attend === 'both' ? h`<button data-alarm-end="${id}">${bell()} End alarm</button>` : ''}
+            ${live ? h`<button class="primary" data-done="${live.id}">${esc(live.btn)}</button>` : ''}
+            ${!underway ? h`<button data-alarm="${id}">${bell()} Alarm</button>` : ''}
+            ${s.def.id === 'bake' ? h`<button data-alarm-end="${id}">${bell()} ${underway ? 'Alarm' : 'End alarm'}</button>` : ''}
           </div>` : ''}
-        ${done && i === ci - 1 && canUndo ? h`<div class="actions"><button class="quiet small" data-undo>Undo this step</button></div>` : ''}
-      </div>`;
+        ${canUndo && acts.includes(lastDone) ? h`<div class="actions"><button class="quiet small" data-undo>Undo ${esc(lastDone.name.toLowerCase())}</button></div>` : ''}
+      </div>` };
+  };
+
+  /** A wait between actions. It ends when you tap the action after it (`until`), or on its own for cooling. */
+  const waitRow = ({ id, name, start, end, until, extra = 0, note, controls }) => {
+    const over = until ? actionDone(bake, until) : !!bake.done[id];
+    // Past its time, a wait that leads into a window (mixing, shaping) has simply handed over to it.
+    const handedOver = until?.at === 'end' && now >= end;
+    const state = over || handedOver ? 'done' : start <= now ? 'running' : '';
+    const mins = Math.round((end - start) / MIN);
+    const left = end - now;
+    return { t: start, html: h`
+      <div class="step wait ${state}" data-step="${id}">
+        <div class="row spread">
+          <div><span class="name">${esc(name)}</span> <span class="range">${range(start, end)}</span></div>
+          <div class="dur" id="dur-${id}">${fmtDur(mins)}</div>
+        </div>
+        ${state === 'running' ? h`<div class="small ${left < 0 ? 'warn' : 'accent'}">${left < 0 ? `${fmtCountdown(left)}${until ? ` · tap ${esc(until.btn.toLowerCase())} when it's done` : ''}` : `Ends ${fmtCountdown(left)}`}</div>` : ''}
+        ${state !== 'done' && note ? h`<div class="small muted">${esc(note)}</div>` : ''}
+        ${state !== 'done' ? h`<div class="controls">${controls ?? slider(id, stepOf(tl, id).dur, { extra, label: name })}</div>` : ''}
+      </div>` };
+  };
+
+  const A = ACTION_BY_ID;
+  const rows = [];
+  for (const s of tl) {
+    const id = s.def.id;
+    if (id === 'feed') {
+      rows.push(actionRow(s, [A.feed]));
+      rows.push(waitRow({ id, name: 'Starter rising', start: s.start, end: s.end, until: A.mix,
+        note: bake.done.feed ? s.def.note : `${s.def.note} This wait sets the feed ratio.` }));
+    } else if (id === 'mix') rows.push(actionRow(s, [A.mix]));
+    else if (id === 'rest') rows.push(waitRow({ id, name: 'First rest', start: s.start, end: s.end, until: A.fold1, note: s.def.note }));
+    else if (id.startsWith('fold')) {
+      rows.push(actionRow(s, [A[id]]));
+      if (id === 'fold4') {
+        // The short rest after the last fold runs straight into bulk, so they show as one wait.
+        const bulk = stepOf(tl, 'bulk');
+        rows.push(waitRow({ id: 'bulk', name: 'Bulk ferment', start: s.start, end: bulk.end, until: A.shape, extra: s.dur,
+          note: `${bulk.def.note}${s.dur ? ` Includes ${fmtDur(s.dur)} after the last fold.` : ''}` }));
+      } else {
+        const n = Number(id.slice(4)) + 1;
+        const first = gapIds[0] === id;
+        rows.push(waitRow({ id, name: `Until fold ${n}`, start: s.start, end: s.end, until: A[`fold${n}`],
+          controls: first ? h`
+            <div class="small row spread"><span class="muted">Time between folds${gapIds.length > 1 ? ', every fold left' : ''}</span><span id="interval-val">${interval} min</span></div>
+            <input type="range" min="15" max="45" step="5" value="${interval}" data-interval aria-label="Time between folds">` : '' }));
+      }
+    } else if (id === 'bulk') continue;
+    else if (id === 'shape') rows.push(actionRow(s, [A.shape]));
+    else if (id === 'cold') rows.push(waitRow({ id, name: 'Cold proof', start: s.start, end: s.end, until: A.ovenIn, note: s.def.note }));
+    else if (id === 'bake') rows.push(actionRow(s, [A.ovenIn, A.ovenOut]));
+    else if (id === 'cool') rows.push(waitRow({ id, name: 'Cool', start: s.start, end: s.end, note: s.def.note }));
+  }
+  const ready = readyAt(tl);
+  rows.push({ t: ready, html: h`
+    <div class="step ready-row ${finished ? 'done' : ''}">
+      <div class="when">${fmtTime(ready)}</div>
+      <div class="name">Ready to eat</div>
+    </div>` });
+
+  // Day headings once per day, and a "now" line before the first thing still ahead.
+  let day = null, nowPlaced = finished;
+  const stepsHtml = rows.map(r => {
+    let out = '';
+    const d = fmtDayWord(r.t, now);
+    if (d !== day) { out += h`<div class="dayhead">${esc(d)}</div>`; day = d; }
+    if (!nowPlaced && r.t > now) { out += h`<div class="nowline"><span>now ${fmtTime(now)}</span></div>`; nowPlaced = true; }
+    return out + r.html;
   }).join('');
 
   const outs = (bake.busy || []).filter(b => b.to > now);
-  const remaining = tl.length - ci;
   keepScroll(() => {
     app.innerHTML = h`
       <div class="topbar">
@@ -238,9 +301,9 @@ export function renderBake(bake) {
       ${showCatchUp ? h`
         <div class="notice soft">
           <div><strong>${catchUp.length === remaining ? (remaining === 1 ? 'The last step' : `The last ${remaining} steps`) : `${catchUp.length} step${catchUp.length > 1 ? 's' : ''}`}</strong>
-            should be done by now: ${esc(catchUp.map(s => s.def.name.toLowerCase()).join(', '))}.</div>
+            should be done by now: ${esc(catchUp.map(a => a.name.toLowerCase()).join(', '))}.</div>
           <button class="primary" data-act="catch-up" style="margin-top:10px">Mark ${catchUp.length === remaining ? 'the rest' : catchUp.length === 1 ? 'it' : 'them'} done as planned</button>
-          <div class="small muted" style="margin-top:8px">If something ran late, tap Done on that step instead.</div>
+          <div class="small muted" style="margin-top:8px">If something ran late, tap its button on the step instead.</div>
         </div>` : ''}
       ${!showCatchUp && hard.length ? h`
         <div class="notice bad">
@@ -297,7 +360,7 @@ export function renderBake(bake) {
   app.querySelectorAll('[data-unbusy]').forEach(b => b.onclick = () => { bake.busy = bake.busy.filter(o => String(o.from) !== b.dataset.unbusy); commit(); });
   app.querySelectorAll('[data-slider]').forEach(inp => {
     const id = inp.dataset.slider;
-    inp.oninput = () => { document.getElementById(`dur-${id}`).textContent = fmtDur(Number(inp.value)); };
+    inp.oninput = () => { document.getElementById(`dur-${id}`).textContent = fmtDur(Number(inp.value) + Number(inp.dataset.extra || 0)); };
     inp.onchange = () => { bake.durs[id] = Number(inp.value); commit(); };
   });
   const iv = app.querySelector('[data-interval]');
@@ -330,108 +393,103 @@ function recordBakeFeed(bake, at) {
   return at;
 }
 
-function doneMessage(step, late, isLast) {
-  if (Math.abs(late) < 5) return `${step.def.name}: done`;
-  const moved = isLast ? '' : ` Later steps moved ${fmtDur(late)} ${late > 0 ? 'later' : 'earlier'}.`;
-  if (isActionStep(step.def)) return `${step.def.name} done ${fmtLate(late)}.${moved}`;
-  return `${step.def.name} ${late > 0 ? `ran ${fmtDur(late)} long` : `finished ${fmtDur(late)} early`}.${moved}`;
+function doneMessage(a, late, isLast, bake) {
+  if (isLast) return `Out of the oven. Ready to eat ${fmtTime(readyAt(bakeTimeline(bake)))}.`;
+  if (Math.abs(late) < 5) return `${a.name}: done`;
+  return `${a.name} ${fmtLate(late)}. Later steps moved ${fmtDur(late)} ${late > 0 ? 'later' : 'earlier'}.`;
 }
 
-/** Mark one step done at `at`, with an undo point. */
+/** Record one action at `at`, with an undo point. */
 function applyDone(bake, id, at) {
   const snap = pushHistory(bake);
-  const tl = bakeTimeline(bake);
-  const step = stepOf(tl, id);
-  const isLast = tl[tl.length - 1].def.id === id;
+  const a = ACTION_BY_ID[id];
+  const acts = bakeActions(bake);
   if (id === 'feed') snap.starterFeedT = recordBakeFeed(bake, at);
-  const late = completeStep(bake, tl, id, at);
+  const late = completeAction(bake, id, at);
+  settleBake(bake);
   save();
   if (isFinished(bake)) { window.scrollTo(0, 0); renderBake(bake); toast('Bake finished. How did it turn out?', 3500); return; }
   keepScroll(() => renderBake(bake));
-  toast(doneMessage(step, late, isLast), Math.abs(late) >= 5 ? 4000 : 2000);
+  toast(doneMessage(a, late, acts[acts.length - 1] === a, bake), Math.abs(late) >= 5 ? 4000 : 2500);
 }
 
 function onDone(bake, id) {
   const now = Date.now();
-  const s = stepOf(bakeTimeline(bake), id);
   // Well past the plan, it may have happened on time and only be logged now, so ask.
-  if (now - plannedDoneAt(s) > HOUR) openWhenDoneSheet(bake, id);
+  if (now - actionTime(bakeTimeline(bake), ACTION_BY_ID[id]) > HOUR) openWhenDoneSheet(bake, id);
   else applyDone(bake, id, now);
 }
 
 function openWhenDoneSheet(bake, id) {
   const now = Date.now();
   const tl = bakeTimeline(bake);
-  const i = tl.findIndex(s => s.def.id === id);
-  const s = tl[i];
-  const planned = plannedDoneAt(s);
-  const isLast = i === tl.length - 1;
-  const earliest = i > 0 ? plannedDoneAt(tl[i - 1]) : -Infinity;
+  const acts = bakeActions(bake);
+  const i = acts.findIndex(a => a.id === id);
+  const a = acts[i];
+  const planned = actionTime(tl, a);
+  const isLast = i === acts.length - 1;
+  const earliest = i > 0 ? actionTime(tl, acts[i - 1]) : -Infinity;
   const effect = at => {
     const b2 = clone(bake);
-    const late = completeStep(b2, bakeTimeline(b2), id, at);
+    const late = completeAction(b2, id, at);
     const ready = readyAt(bakeTimeline(b2));
     if (Math.abs(late) < 5) return 'On time. Nothing else moves.';
-    return `${fmtLate(late)[0].toUpperCase()}${fmtLate(late).slice(1)}.${isLast ? '' : ` Later steps move ${fmtDur(late)} ${late > 0 ? 'later' : 'earlier'}; ready ${fmtWhen(ready, now)}.`}`;
+    return `${fmtLate(late)[0].toUpperCase()}${fmtLate(late).slice(1)}.${isLast ? ` Ready ${fmtWhen(ready, now)}.` : ` Later steps move ${fmtDur(late)} ${late > 0 ? 'later' : 'earlier'}; ready ${fmtWhen(ready, now)}.`}`;
   };
   let pickAt = planned;
-  const draw = () => {
-    openSheet(h`
-      <h2>${esc(s.def.doneQ || `When was ${s.def.name.toLowerCase()} done?`)}</h2>
-      <p class="muted small" style="margin-top:6px">It was planned for ${fmtWhen(planned, now)}.</p>
-      <div class="stack">
-        <button class="choice" data-when="planned">
-          <span class="row spread"><strong>At the planned time</strong><span>${fmtWhen(planned, now)}</span></span>
-          <span class="small muted">I just forgot to tap it. Nothing else moves.</span>
-        </button>
-        <button class="choice" data-when="now">
-          <span class="row spread"><strong>Just now</strong><span>${fmtWhen(now, now)}</span></span>
-          <span class="small muted">${esc(effect(now))}</span>
-        </button>
-        <div class="choice static">
-          <strong>Pick a time</strong>
-          <input type="datetime-local" value="${toLocalInput(pickAt)}" data-pick style="margin-top:8px" aria-label="When it was done">
-          <div class="small muted" data-pick-effect style="margin-top:6px">${esc(effect(pickAt))}</div>
-          <button class="primary wide" data-when="pick" style="margin-top:10px">Use this time</button>
-        </div>
-        <button class="quiet" data-close>Cancel</button>
+  openSheet(h`
+    <h2>${esc(a.doneQ)}</h2>
+    <p class="muted small" style="margin-top:6px">It was planned for ${fmtWhen(planned, now)}.</p>
+    <div class="stack">
+      <button class="choice" data-when="planned">
+        <span class="row spread"><strong>At the planned time</strong><span>${fmtWhen(planned, now)}</span></span>
+        <span class="small muted">I just forgot to tap it. Nothing else moves.</span>
+      </button>
+      <button class="choice" data-when="now">
+        <span class="row spread"><strong>Just now</strong><span>${fmtWhen(now, now)}</span></span>
+        <span class="small muted">${esc(effect(now))}</span>
+      </button>
+      <div class="choice static">
+        <strong>Pick a time</strong>
+        <input type="datetime-local" value="${toLocalInput(pickAt)}" data-pick style="margin-top:8px" aria-label="When it was done">
+        <div class="small muted" data-pick-effect style="margin-top:6px">${esc(effect(pickAt))}</div>
+        <button class="primary wide" data-when="pick" style="margin-top:10px">Use this time</button>
       </div>
-    `);
-    const pick = sheet.querySelector('[data-pick]');
-    pick.onchange = () => {
-      const t = new Date(pick.value).getTime();
-      if (isNaN(t)) return;
-      pickAt = t;
-      sheet.querySelector('[data-pick-effect]').textContent = pickAt > Date.now() + 5 * MIN
-        ? 'That’s in the future.' : pickAt < earliest ? `That’s before the previous step was done (${fmtWhen(earliest, now)}).` : effect(pickAt);
-    };
-    on(sheet, '[data-close]', closeSheet);
-    sheet.querySelectorAll('[data-when]').forEach(b => b.onclick = () => {
-      const at = { planned, now: Date.now(), pick: pickAt }[b.dataset.when];
-      if (at > Date.now() + 5 * MIN) { toast('That time is in the future'); return; }
-      if (at < earliest) { toast('That’s before the previous step was done'); return; }
-      closeSheet(); applyDone(bake, id, at);
-    });
+      <button class="quiet" data-close>Cancel</button>
+    </div>
+  `);
+  const pick = sheet.querySelector('[data-pick]');
+  pick.onchange = () => {
+    const t = new Date(pick.value).getTime();
+    if (isNaN(t)) return;
+    pickAt = t;
+    sheet.querySelector('[data-pick-effect]').textContent = pickAt > Date.now() + 5 * MIN
+      ? 'That’s in the future.' : pickAt < earliest ? `That’s before the previous step was done (${fmtWhen(earliest, now)}).` : effect(pickAt);
   };
-  draw();
+  on(sheet, '[data-close]', closeSheet);
+  sheet.querySelectorAll('[data-when]').forEach(b => b.onclick = () => {
+    const at = { planned, now: Date.now(), pick: pickAt }[b.dataset.when];
+    if (at > Date.now() + 5 * MIN) { toast('That time is in the future'); return; }
+    if (at < earliest) { toast('That’s before the previous step was done'); return; }
+    closeSheet(); applyDone(bake, id, at);
+  });
 }
 
-/** Mark every step whose planned time has passed as done on time, as one undoable change. */
+/** Record every action whose planned time has passed as done on time, as one undoable change. */
 function catchUpBake(bake) {
-  const steps = catchUpSteps(bake, Date.now());
-  if (!steps.length) return;
+  const acts = catchUpActions(bake, Date.now());
+  if (!acts.length) return;
   const snap = pushHistory(bake);
-  for (const s of steps) {
-    const tl = bakeTimeline(bake);
-    const step = stepOf(tl, s.def.id);
-    const at = plannedDoneAt(step);
-    if (s.def.id === 'feed') snap.starterFeedT = recordBakeFeed(bake, at);
-    completeStep(bake, tl, s.def.id, at);
+  for (const a of acts) {
+    const at = actionTime(bakeTimeline(bake), a);
+    if (a.id === 'feed') snap.starterFeedT = recordBakeFeed(bake, at);
+    completeAction(bake, a.id, at);
   }
+  settleBake(bake);
   save();
   window.scrollTo(0, 0);
   renderBake(bake);
-  toast(isFinished(bake) ? 'Marked done. How did it turn out?' : `${steps.length} step${steps.length > 1 ? 's' : ''} marked done`, 3500);
+  toast(isFinished(bake) ? 'Marked done. How did it turn out?' : `${acts.length} step${acts.length > 1 ? 's' : ''} marked done`, 3500);
 }
 
 function undoLastStep(bake) {

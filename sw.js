@@ -1,5 +1,5 @@
 // Network first so updates show on the next open; falls back to the cache offline.
-const CACHE = 'sourdough-v4';
+const CACHE = 'sourdough-v5';
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './store.js', './ui.js', './bake-view.js', './starter-view.js',
   './recipe-view.js', './settings-view.js', './format.js', './schedule.js', './starter.js', './recipes.js', './guide.js',
   './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
